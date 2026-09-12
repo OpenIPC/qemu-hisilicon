@@ -63,6 +63,8 @@
 #define FMC_OP_WRITE_DATA_EN    BIT(5)
 #define FMC_OP_ADDR_EN          BIT(6)
 #define FMC_OP_CMD1_EN          BIT(7)
+/* fmc100 shuffles OP: bit1 is ADDR_EN there, not READ_STATUS_EN. */
+#define FMC100_OP_ADDR_EN       BIT(1)
 
 /* FMC_OP_CFG bits */
 #define FMC_OP_CFG_FM_CS_SHIFT  11
@@ -222,6 +224,7 @@ struct HisiFmcState {
     uint32_t cmd;
     uint32_t addrh;
     uint32_t addrl;
+    uint32_t op;                  /* last FMC_OP written (ADDR_EN et al) */
     uint32_t op_cfg;
     uint32_t spi_op_addr;
     uint32_t data_num;
@@ -546,20 +549,36 @@ static bool hisi_fmc_exec_nor_reg_op(HisiFmcState *s)
         break;
 
     case SPI_CMD_SECTOR_ERASE: {
-        /* The SPI-NOR core's default sector erase sends the target address
-         * as big-endian data bytes through write_reg (memcpy_toio into the
-         * IO buffer) — bsp_spi_nor_op_reg never programs FMC_ADDRL.  So the
-         * erase address lives in iobuf, NOT in the (stale) addrl register.
-         * Reading addrl here made flash_eraseall/flashcp erase whatever
-         * block a prior DMA op happened to leave in addrl, silently leaving
-         * the real target intact (sysupgrade kernel/rootfs reflash failed). */
-        uint32_t erase_addr = 0;
-        if (len >= 3) {
+        /* Two callers, two conventions, and FMC_OP.ADDR_EN is what tells
+         * them apart.
+         *
+         * ADDR_EN clear — the SPI-NOR core's default sector erase sends the
+         * target address as big-endian data bytes through write_reg (memcpy_toio
+         * into the IO buffer); bsp_spi_nor_op_reg never programs FMC_ADDRL.  So
+         * the erase address lives in iobuf, NOT in the (stale) addrl register.
+         * Reading addrl here made flash_eraseall/flashcp erase whatever block a
+         * prior DMA op happened to leave in addrl, silently leaving the real
+         * target intact (sysupgrade kernel/rootfs reflash failed).
+         *
+         * ADDR_EN set — U-Boot's hifmc100 driver has the controller emit the
+         * address from FMC_ADDRL and uses FMC_DATA_NUM only as the address
+         * *byte count*, so iobuf holds whatever the previous op left there.
+         * Decoding iobuf in that case yielded 0xffffff, past the end of the
+         * chip, and every erase became a silent no-op: the following page
+         * programs then ANDed into un-erased flash.  That is what broke
+         * U-Boot's SD-card auto-update (product/hiupdate) — kernel and rootfs
+         * both landed as new & old, and the board would not boot.
+         */
+        uint32_t addr_en = (s->variant == FMC_VARIANT_FMC100)
+                           ? FMC100_OP_ADDR_EN : FMC_OP_ADDR_EN;
+        uint32_t erase_addr;
+        if ((s->op & addr_en) || len < 3) {
+            erase_addr = addr;
+        } else {
+            erase_addr = 0;
             for (uint32_t i = 0; i < len && i < 4; i++) {
                 erase_addr = (erase_addr << 8) | s->iobuf[i];
             }
-        } else {
-            erase_addr = addr;  /* fallback: no address bytes supplied */
         }
         uint32_t base = erase_addr & ~(NOR_SECTOR_SIZE - 1);
         uint32_t end = base + NOR_SECTOR_SIZE;
@@ -969,6 +988,7 @@ static void hisi_fmc_ctrl_write(void *opaque, hwaddr offset,
 
     case FMC_OP:
         s->iobuf_valid = false;
+        s->op = value;
         if (value & FMC_OP_REG_OP_START) {
             /* On fmc100 bit1 is ADDR_EN, not READ_STATUS_EN — always dispatch
              * by SPI command (READ_STATUS 0x05 lands the SR in iobuf, which the

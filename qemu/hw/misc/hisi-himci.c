@@ -119,8 +119,10 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiHimciState, HISI_HIMCI)
 /* IDSTS */
 #define IDSTS_TI         (1u << 0)
 #define IDSTS_RI         (1u << 1)
+#define IDSTS_DU         (1u << 4)
 #define IDSTS_CES        (1u << 5)
 #define IDSTS_NIS        (1u << 8)
+#define IDSTS_AIS        (1u << 9)
 #define IDSTS_PACKET_INT (1u << 25)
 
 /* IDMAC descriptor control bits */
@@ -225,9 +227,38 @@ static void hisi_himci_do_data(HisiHimciState *s, uint32_t idmac_addr,
     uint32_t desc_addr = idmac_addr;
     uint32_t remaining = s->bytcnt;
     uint8_t buf[4096];
-    int safety = 1024;
 
-    while (remaining > 0 && safety-- > 0) {
+    /*
+     * Budget the walk against the transfer rather than against a fixed
+     * descriptor count.  A fixed 1024 used to sit here and silently truncated
+     * every transfer past 4 MiB (1024 x 4 KiB): U-Boot's SD recovery path
+     * reads a 5 MiB rootfs image in one CMD18 burst, so the tail arrived as
+     * stale DRAM and the uImage data CRC failed with "bad data checksum".
+     *
+     * "Bounded by `remaining`" is not on its own a bound worth having: BS1
+     * permits a one-byte descriptor, so a chain of those against a 32-bit
+     * BYTCNT is billions of synchronous DMA + SD-bus iterations with the vCPU
+     * thread stuck in every one of them.  One descriptor per 512-byte block is
+     * the finest granularity a real transfer uses, so allow that many plus
+     * slack: the 5 MiB read above needs ~1240 descriptors and is given ~10900,
+     * while a pathological chain is stopped in proportion to what it claimed
+     * to move rather than to what it could name.
+     */
+    uint64_t budget = (uint64_t)remaining / 512 + 1024;
+
+    while (remaining > 0) {
+        if (budget-- == 0) {
+            /* Report it the way the controller would, and do not fall through
+             * to the completion status below: a transfer that did not finish
+             * must not look like one that did. */
+            qemu_log_mask(LOG_GUEST_ERROR,
+                          "hisi-himci: IDMAC chain exceeded its descriptor "
+                          "budget with %u of %u bytes outstanding\n",
+                          remaining, s->bytcnt);
+            s->idsts |= IDSTS_DU | IDSTS_AIS;
+            return;
+        }
+
         uint32_t desc[4];
         dma_memory_read(as, desc_addr, desc, 16, MEMTXATTRS_UNSPECIFIED);
 
@@ -239,21 +270,29 @@ static void hisi_himci_do_data(HisiHimciState *s, uint32_t idmac_addr,
         if (!(ctrl & IDMAC_OWN)) {
             break;
         }
-        if (buf_size > sizeof(buf)) {
-            buf_size = sizeof(buf);
-        }
         if (buf_size > remaining) {
             buf_size = remaining;
         }
 
-        if (is_write) {
-            dma_memory_read(as, buf_addr, buf, buf_size,
-                            MEMTXATTRS_UNSPECIFIED);
-            sdbus_write_data(&s->sdbus, buf, buf_size);
-        } else {
-            sdbus_read_data(&s->sdbus, buf, buf_size);
-            dma_memory_write(as, buf_addr, buf, buf_size,
-                             MEMTXATTRS_UNSPECIFIED);
+        /*
+         * BS1 is 13 bits, so a descriptor may declare up to 8191 bytes --
+         * twice the bounce buffer.  Move it in bounce-sized chunks instead
+         * of clamping, which would drop the tail of the buffer and leave
+         * the card's data stream out of step with the descriptor chain.
+         */
+        for (uint32_t done = 0; done < buf_size; ) {
+            uint32_t chunk = MIN(buf_size - done, (uint32_t)sizeof(buf));
+
+            if (is_write) {
+                dma_memory_read(as, buf_addr + done, buf, chunk,
+                                MEMTXATTRS_UNSPECIFIED);
+                sdbus_write_data(&s->sdbus, buf, chunk);
+            } else {
+                sdbus_read_data(&s->sdbus, buf, chunk);
+                dma_memory_write(as, buf_addr + done, buf, chunk,
+                                 MEMTXATTRS_UNSPECIFIED);
+            }
+            done += chunk;
         }
 
         remaining -= buf_size;
@@ -263,6 +302,10 @@ static void hisi_himci_do_data(HisiHimciState *s, uint32_t idmac_addr,
         dma_memory_write(as, desc_addr, &desc[0], 4, MEMTXATTRS_UNSPECIFIED);
 
         if (ctrl & IDMAC_LD) {
+            break;
+        }
+        /* A descriptor that moves nothing cannot advance the transfer. */
+        if (buf_size == 0) {
             break;
         }
         desc_addr = next_addr;
