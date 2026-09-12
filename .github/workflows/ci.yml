@@ -416,18 +416,6 @@ jobs:
             ping_linux: true
             uboot_bin: u-boot-hi3516cv300-universal.bin
             flash_mem: 256M
-            # Exercise the HiFMC NOR erase+program path from Linux userspace
-            # (flash_eraseall + flashcp -v). Guards the erase-address/WEL fix
-            # that OpenIPC firstboot & sysupgrade depend on. cv300 stands in
-            # for all hisi-fmc SoCs (the fix is in shared hisi-fmc.c).
-            #
-            # It runs here rather than on ev300 because the test has to claim
-            # the camera to get a shell, and claiming a majestic image means
-            # accepting the Majestic EULA -- which is the owner's to accept,
-            # never CI's. So it needs a majestic-free build, and cv300 is one
-            # of the two SoCs with a published `mini` image.
-            flash_rw: true
-            flash_rw_image: openipc.hi3516cv300-nor-mini.tgz
 
           # cv500 family covers av300 (same die, av300 is variant id 5);
           # one Linux + U-Boot gate exercises both.  flash_mem=1G because
@@ -460,6 +448,11 @@ jobs:
             ping_linux: true
             uboot_bin: u-boot-hi3516ev300-universal.bin
             flash_mem: 128M
+            # Exercise the HiFMC NOR erase+program path from Linux userspace
+            # (flash_eraseall + flashcp -v). Guards the erase-address/WEL fix
+            # that OpenIPC firstboot & sysupgrade depend on. ev300 stands in
+            # for all hisi-fmc SoCs (the fix is in shared hisi-fmc.c).
+            flash_rw: true
 
           # gk7205v500 (Goke V500) full-Linux boot regression gate.
           # The goke V500 OpenIPC kernel uses an "xmsp804" timer
@@ -535,16 +528,26 @@ jobs:
           sudo ip link set qbr0 up
           sudo ip link set tap0 up
           sudo ip addr add 10.0.10.1/24 dev qbr0
+          # Second host address, off the guest's subnet on purpose: it is
+          # advertised as the guest's DNS server, so a query only reaches us if
+          # the guest installed and used the default route we handed it.
+          sudo ip addr add 10.0.20.1/24 dev qbr0
           sudo iptables -I INPUT -i qbr0 -j ACCEPT
           # HTTP server for TCP connectivity test (validates TX checksum offload)
           python3 -m http.server 8080 --bind 10.0.10.1 &
           # dnsmasq: DHCP + DNS forwarder on the bridge
-          sudo dnsmasq --interface=qbr0 --bind-interfaces --listen-address=10.0.10.1 \
+          sudo dnsmasq --interface=qbr0 --bind-interfaces \
+            --listen-address=10.0.10.1 --listen-address=10.0.20.1 \
             --dhcp-range=10.0.10.50,10.0.10.99,255.255.255.0,1h \
-            --dhcp-option=3,10.0.10.1 --dhcp-option=6,10.0.10.1 \
+            --dhcp-option=3,10.0.10.1 --dhcp-option=6,10.0.20.1 \
             --no-resolv --server=8.8.8.8 \
-            --no-daemon --log-dhcp --pid-file=/tmp/dnsmasq.pid &
+            --no-daemon --log-dhcp --log-queries \
+            --log-facility=/tmp/dnsmasq-ci.log \
+            --pid-file=/tmp/dnsmasq.pid &
           sleep 1
+          # The network check reads the lease and the guest's DNS queries out
+          # of this log instead of driving a shell in the guest.
+          sudo touch /tmp/dnsmasq-ci.log && sudo chmod 0644 /tmp/dnsmasq-ci.log
 
       - name: Download firmware
         run: |
@@ -617,30 +620,17 @@ jobs:
         if: matrix.flash_rw
         timeout-minutes: 8
         run: |
-          # A majestic-free image, from OpenIPC/builder: the test claims the
-          # camera to get a shell, and on an image carrying majestic the claim
-          # runs the Majestic EULA first. Accepting that belongs to the
-          # camera's human owner, so the harness refuses to type it and CI
-          # must hand it a `mini` build instead. The nor-lite tarball the
-          # other steps use stays where it is.
-          mkdir -p qemu-boot/flash-rw-img
-          curl -sL "https://github.com/OpenIPC/builder/releases/download/latest/${{ matrix.flash_rw_image }}" \
-              -o "qemu-boot/flash-rw-img/${{ matrix.flash_rw_image }}"
-          tar xzf "qemu-boot/flash-rw-img/${{ matrix.flash_rw_image }}" \
-              -C qemu-boot/flash-rw-img
           bash qemu-boot/test-flash-rw.sh \
             --soc "${{ matrix.soc }}" \
             --machine "${{ matrix.machine }}" \
             --qemu ./qemu-src/build/qemu-system-arm \
             --output-dir "qemu-boot/flash-rw-${{ matrix.soc }}" \
-            --kernel "qemu-boot/flash-rw-img/uImage.${{ matrix.soc }}" \
-            --rootfs "qemu-boot/flash-rw-img/rootfs.squashfs.${{ matrix.soc }}" \
             --mem 128M \
-            --login-timeout 120
+            --timeout 240
 
-      - name: "Linux ping + curl test"
+      - name: "Linux network test"
         if: matrix.ping_linux
-        timeout-minutes: 4
+        timeout-minutes: 6
         run: |
           bash qemu-boot/test-linux-network.sh \
             --soc "${{ matrix.soc }}" \
@@ -649,10 +639,12 @@ jobs:
             --qemu ./qemu-src/build/qemu-system-arm \
             --tap tap0 \
             --host-ip 10.0.10.1 \
-            --login-timeout 120 \
+            --login-timeout 150 \
             --ping-timeout 45 \
-            --curl-timeout 100 \
+            --curl-timeout 60 \
             --curl-max-time 90 \
+            --dns-ip 10.0.20.1 \
+            --dnsmasq-log /tmp/dnsmasq-ci.log \
             --output-dir "qemu-boot/linux-network-${{ matrix.soc }}"
 
       - name: "U-Boot ping test"
