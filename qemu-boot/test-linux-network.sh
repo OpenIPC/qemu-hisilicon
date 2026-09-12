@@ -21,6 +21,9 @@ Options:
   --curl-timeout SEC       Wait for curl completion marker (default: 100)
   --curl-max-time SEC      Guest curl --max-time value (default: 90)
   --output-dir DIR         Directory for diagnostic output (default: /tmp/linux-network-SOC-PID)
+  --dnsmasq-log PATH       dnsmasq log to read the DHCP lease and DNS queries
+                           from; must match the --log-facility of whoever
+                           started dnsmasq (default: OUTPUT_DIR/dnsmasq.log)
 EOF
 }
 
@@ -36,6 +39,7 @@ CURL_TIMEOUT=100
 CURL_MAX_TIME=90
 SETUP_NETWORK=0
 OUTPUT_DIR=""
+DNSMASQ_LOG_ARG=""
 SOC=""
 MACHINE=""
 MEM_MB=""
@@ -57,6 +61,7 @@ while [ $# -gt 0 ]; do
         --curl-timeout) CURL_TIMEOUT="$2"; shift 2 ;;
         --curl-max-time) CURL_MAX_TIME="$2"; shift 2 ;;
         --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
+        --dnsmasq-log) DNSMASQ_LOG_ARG="$2"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *)
             echo "Unknown option: $1" >&2
@@ -87,7 +92,7 @@ SER_OUT="${SER_PREFIX}.out"
 SERIAL_LOG="/tmp/linux-ping.txt"
 SUMMARY_LOG="/tmp/linux-network-summary.txt"
 HTTP_LOG="${OUTPUT_DIR}/http.log"
-DNSMASQ_LOG="${OUTPUT_DIR}/dnsmasq.log"
+DNSMASQ_LOG="${DNSMASQ_LOG_ARG:-${OUTPUT_DIR}/dnsmasq.log}"
 QEMU_STDOUT="${OUTPUT_DIR}/qemu.stdout"
 QEMU_STDERR="${OUTPUT_DIR}/qemu.stderr"
 QEMU_PS_START="${OUTPUT_DIR}/qemu-ps-start.txt"
@@ -108,6 +113,12 @@ cleanup() {
     [ -n "$HTTP_PID" ] && kill "$HTTP_PID" 2>/dev/null || true
     rm -f "$SER_IN" "$SER_OUT"
     if [ "$SETUP_NETWORK" = "1" ]; then
+        # --no-daemon dnsmasq never writes the pid file, so killing by it is a
+        # no-op and the instance outlives the run, holding the listen address:
+        # the next run's dnsmasq then dies with "Address already in use" and
+        # writes no log, which reads as a DHCP failure in a guest that in fact
+        # leased fine.  Match the command line instead.
+        sudo pkill -f "dnsmasq --interface=${BRIDGE}" 2>/dev/null || true
         sudo kill "$(cat /tmp/dnsmasq.pid 2>/dev/null)" 2>/dev/null || true
         sudo iptables -D INPUT -i "$BRIDGE" -j ACCEPT 2>/dev/null || true
         sudo ip link del "$BRIDGE" 2>/dev/null || true
@@ -138,6 +149,7 @@ start_ts=$(date +%s)
 if [ "$SETUP_NETWORK" = "1" ]; then
     sudo ip link del "$BRIDGE" 2>/dev/null || true
     sudo ip tuntap del dev "$TAP" mode tap 2>/dev/null || true
+    sudo pkill -f "dnsmasq --interface=${BRIDGE}" 2>/dev/null || true
     sudo kill "$(cat /tmp/dnsmasq.pid 2>/dev/null)" 2>/dev/null || true
     sudo iptables -D INPUT -i "$BRIDGE" -j ACCEPT 2>/dev/null || true
 
@@ -157,123 +169,145 @@ if [ "$SETUP_NETWORK" = "1" ]; then
         --dhcp-range=10.0.10.50,10.0.10.99,255.255.255.0,1h \
         --dhcp-option=3,"$HOST_IP" --dhcp-option=6,"$HOST_IP" \
         --no-resolv --server=8.8.8.8 \
-        --no-daemon --log-dhcp --pid-file=/tmp/dnsmasq.pid >"$DNSMASQ_LOG" 2>&1 &
+        --no-daemon --log-dhcp --log-queries --log-facility="$DNSMASQ_LOG" \
+        --pid-file=/tmp/dnsmasq.pid >"${DNSMASQ_LOG}.stderr" 2>&1 &
     sleep 1
 fi
 
-mkfifo "$SER_IN" "$SER_OUT"
+# No console driving.  Root's login shell is `openipc-claim`, which hands out
+# no shell until the camera has an owner, and on a majestic image claiming
+# shows the Majestic EULA first -- acceptance that belongs to the camera's
+# human owner and never to CI (OpenIPC/firmware CLAUDE.md, "Policy, for AI
+# assistants").  Rather than swap in an image that has no gate, this asserts
+# the network from outside the guest: everything the check needs is done by
+# the guest's own init, long before any login exists.
+#
+#   S40network  -> udhcpc on eth0
+#   S49ntpd     -> busybox ntpd resolves its pool
+#   S50dropbear -> listens on 22 ("-R -B -k -p 22 -K 300")
+#
+# so the four assertions below cover both directions with no shell at all:
+#
+#   1. a full DHCP DORA in the dnsmasq log -- guest TX *and* RX over UDP: the
+#      guest only sends REQUEST once it has received and parsed our OFFER
+#   2. host -> guest ICMP -- the request is guest RX, the reply is guest TX
+#   3. host -> guest TCP on 22 -- dropbear's version banner arrives before any
+#      authentication, so real payload crosses in both directions
+#   4. a DNS query from the guest's address -- guest-*initiated* traffic, out
+#      through its default route
+#
+# What this gives up, and the console-driven version had, is the guest acting
+# as a TCP client (curl).  Nothing in a stock boot opens an outbound TCP
+# connection by itself, and arranging one would mean a shell, which means the
+# claim.  Checks 1 and 4 keep guest-initiated traffic covered over UDP.
 "$QEMU" \
     -M "$MACHINE" $MEM_ARG \
     -kernel "$REPO_ROOT/qemu-boot/uImage.${SOC}" \
     -initrd "$REPO_ROOT/qemu-boot/rootfs.squashfs.${SOC}" \
-    -nographic -serial "pipe:${SER_PREFIX}" \
+    -nographic -serial file:"$SERIAL_LOG" \
     -append "$APPEND" \
     -nic "tap,ifname=${TAP},script=no,downscript=no" \
     -monitor none >"$QEMU_STDOUT" 2>"$QEMU_STDERR" &
 QEMU_PID=$!
 ps -o pid,ppid,pcpu,pmem,etime,cmd -p "$QEMU_PID" > "$QEMU_PS_START"
 
-cat "$SER_OUT" > "$SERIAL_LOG" &
-CAT_PID=$!
+# dnsmasq runs as root and its log file is created 0600, so make it readable
+# rather than needing sudo for every poll.  Harmless if it does not exist yet.
+sudo chmod 0644 "$DNSMASQ_LOG" 2>/dev/null || true
 
-wait_for_marker() {
-    local marker="$1"
-    local timeout_sec="$2"
-    local start_wait
-    start_wait=$(date +%s)
-    while [ $(( $(date +%s) - start_wait )) -lt "$timeout_sec" ]; do
-        if grep -a -q "$marker" "$SERIAL_LOG" 2>/dev/null; then
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
+FAIL=0
+say() { printf '%-42s %s\n' "$1" "$2"; }
+
+# 1 --- DHCP -----------------------------------------------------------------
+GUEST_IP=""
+for _ in $(seq 1 "$LOGIN_TIMEOUT"); do
+    sudo chmod 0644 "$DNSMASQ_LOG" 2>/dev/null || true
+    GUEST_IP=$(grep -aoE 'DHCPACK\([^)]*\) ([0-9]{1,3}\.){3}[0-9]{1,3}' "$DNSMASQ_LOG" 2>/dev/null \
+               | tail -1 | awk '{print $2}') || true
+    [ -n "$GUEST_IP" ] && break
+    kill -0 "$QEMU_PID" 2>/dev/null || break
+    sleep 1
+done
+if [ -n "$GUEST_IP" ]; then
+    say "1. DHCP lease (guest TX+RX, UDP)" "PASS -> $GUEST_IP"
+    echo "guest_ip=$GUEST_IP" >> "$SUMMARY_LOG"
+    echo "dhcp_elapsed=$(( $(date +%s) - start_ts ))" >> "$SUMMARY_LOG"
+    grep -aoE 'DHCP(DISCOVER|OFFER|REQUEST|ACK)' "$DNSMASQ_LOG" | sort -u | tr '\n' ' ' || true
+    echo
+else
+    say "1. DHCP lease (guest TX+RX, UDP)" "FAIL (no DHCPACK)"
+    echo "dhcp_elapsed=timeout" >> "$SUMMARY_LOG"
+    echo "--- last 40 serial lines ---"; tail -40 "$SERIAL_LOG" 2>/dev/null || true
+    echo "--- dnsmasq ---"; sudo tail -20 "$DNSMASQ_LOG" 2>/dev/null || true
+    exit 1
+fi
+
+# 2 --- ICMP, host -> guest ---------------------------------------------------
+if ping -c 3 -W 5 "$GUEST_IP" > "${OUTPUT_DIR}/ping.txt" 2>&1; then
+    say "2. host->guest ICMP" "PASS ($(grep -o '[0-9]*% packet loss' "${OUTPUT_DIR}/ping.txt"))"
+else
+    say "2. host->guest ICMP" "FAIL"; cat "${OUTPUT_DIR}/ping.txt" || true; FAIL=1
+fi
+
+# 3 --- TCP, host -> guest ----------------------------------------------------
+# bash's /dev/tcp, so no nc dependency.  Dropbear answers with its version
+# banner before any authentication, so this needs no credentials and does not
+# touch the claim.
+ssh_banner() {
+    local line=""
+    exec 3<>/dev/tcp/"$GUEST_IP"/22 2>/dev/null || return 1
+    IFS= read -r -t 5 line <&3 || true
+    exec 3<&- 3>&- 2>/dev/null || true
+    printf '%s' "$line"
 }
-
-if wait_for_marker "login:" "$LOGIN_TIMEOUT"; then
-    echo "login_elapsed=$(( $(date +%s) - start_ts ))" >> "$SUMMARY_LOG"
+BANNER=""
+for _ in $(seq 1 "$PING_TIMEOUT"); do
+    BANNER=$(ssh_banner || true)
+    [ -n "$BANNER" ] && break
+    sleep 2
+done
+if [ -n "$BANNER" ]; then
+    say "3. host->guest TCP :22" "PASS -> ${BANNER%$'\r'}"
 else
-    echo "login_elapsed=timeout" >> "$SUMMARY_LOG"
-    echo "=== FAIL: login prompt not reached ==="
-    tail -40 "$SERIAL_LOG" || true
-    exit 1
+    say "3. host->guest TCP :22" "FAIL (no banner)"; FAIL=1
 fi
 
-printf 'root\n' > "$SER_IN"
-if ! wait_for_marker 'Password:' 30; then
-    echo "password_prompt=timeout" >> "$SUMMARY_LOG"
-    echo "=== FAIL: password prompt not reached after username ==="
-    tail -40 "$SERIAL_LOG" || true
-    exit 1
-fi
-
-printf '12345\n' > "$SER_IN"
-
-printf 'echo SHELL_READY $(date +%%s)\n' > "$SER_IN"
-if ! wait_for_marker '^SHELL_READY ' 30; then
-    echo "shell_ready=timeout" >> "$SUMMARY_LOG"
-    echo "=== FAIL: shell prompt did not become ready after login ==="
-    tail -40 "$SERIAL_LOG" || true
-    exit 1
-fi
-
-printf 'uname -a\n' > "$SER_IN"
-printf 'cat /proc/loadavg\n' > "$SER_IN"
-printf 'free\n' > "$SER_IN"
-printf 'ip addr show\n' > "$SER_IN"
-printf 'route -n\n' > "$SER_IN"
-
-ping_cmd="ping -c 3 ${HOST_IP}; echo PING_DONE RC=\$? \$(date +%s)"
-printf '%s\n' "$ping_cmd" > "$SER_IN"
-if wait_for_marker '^PING_DONE RC=' "$PING_TIMEOUT"; then
-    echo "ping_elapsed=$(( $(date +%s) - start_ts ))" >> "$SUMMARY_LOG"
+# 4 --- guest-initiated outbound ----------------------------------------------
+# busybox ntpd resolves its peers at S49, so a query reaching dnsmasq from the
+# guest proves the default route and outbound UDP.  Any name will do -- which
+# server the image is configured with is not this test's business.
+QUERY=""
+for _ in $(seq 1 "$CURL_TIMEOUT"); do
+    sudo chmod 0644 "$DNSMASQ_LOG" 2>/dev/null || true
+    QUERY=$(grep -a "query\[" "$DNSMASQ_LOG" 2>/dev/null | grep -a "from ${GUEST_IP}" | head -1) || true
+    [ -n "$QUERY" ] && break
+    sleep 2
+done
+if [ -n "$QUERY" ]; then
+    say "4. guest->out DNS query" "PASS -> ${QUERY#*: }"
 else
-    echo "ping_elapsed=timeout" >> "$SUMMARY_LOG"
+    say "4. guest->out DNS query" "FAIL (no query from $GUEST_IP)"; FAIL=1
 fi
 
-curl_cmd="echo CURL_START \$(date +%s); curl --connect-timeout 10 --max-time ${CURL_MAX_TIME} -s -o /dev/null -w 'HTTP_CODE=%{http_code}\n' http://${HOST_IP}:8080/; echo CURL_DONE RC=\$? \$(date +%s)"
-printf '%s\n' "$curl_cmd" > "$SER_IN"
-if wait_for_marker '^CURL_DONE RC=' "$CURL_TIMEOUT"; then
-    echo "curl_elapsed=$(( $(date +%s) - start_ts ))" >> "$SUMMARY_LOG"
-else
-    echo "curl_elapsed=timeout" >> "$SUMMARY_LOG"
-fi
-
-ps -o pid,ppid,pcpu,pmem,etime,cmd -p "$QEMU_PID" > "$QEMU_PS_END"
+ps -o pid,ppid,pcpu,pmem,etime,cmd -p "$QEMU_PID" > "$QEMU_PS_END" 2>/dev/null || true
 {
     echo "=== host end ==="
     uptime
     ps -eo pid,pcpu,pmem,etime,cmd --sort=-pcpu | sed -n '1,12p'
 } >> "$HOST_METRICS"
-echo "host_uptime_end=$(uptime)" >> "$SUMMARY_LOG"
-echo "host_end=$(date --iso-8601=seconds)" >> "$SUMMARY_LOG"
-echo "output_dir=$OUTPUT_DIR" >> "$SUMMARY_LOG"
+{
+    echo "host_uptime_end=$(uptime)"
+    echo "host_end=$(date --iso-8601=seconds)"
+    echo "output_dir=$OUTPUT_DIR"
+} >> "$SUMMARY_LOG"
 
 kill "$QEMU_PID" 2>/dev/null || true
 wait "$QEMU_PID" 2>/dev/null || true
-kill "$CAT_PID" 2>/dev/null || true
-rm -f "$SER_IN" "$SER_OUT"
-
-FAIL=0
-
-if grep -a -q "PING_DONE RC=0" "$SERIAL_LOG"; then
-    echo "=== PASS: Linux ping ==="
-else
-    echo "=== FAIL: Linux ping ==="
-    grep -a -E "PING|bytes from|packet loss|PING_DONE" "$SERIAL_LOG" || true
-    FAIL=1
-fi
-
-if grep -a -q "HTTP_CODE=200" "$SERIAL_LOG" && grep -a -q "CURL_DONE RC=0" "$SERIAL_LOG"; then
-    echo "=== PASS: Linux curl (TCP) ==="
-else
-    echo "=== FAIL: Linux curl (TCP) ==="
-    grep -a -E "CURL_START|HTTP_CODE|CURL_DONE|curl" "$SERIAL_LOG" || true
-    FAIL=1
-fi
 
 cat "$SUMMARY_LOG"
 
 if [ "$FAIL" -ne 0 ]; then
+    echo "=== FAIL: Linux network ==="
     exit 1
 fi
+echo "=== PASS: Linux network (DHCP + ICMP + TCP + outbound DNS) ==="
