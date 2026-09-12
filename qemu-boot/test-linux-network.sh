@@ -274,10 +274,14 @@ fi
 # banner before any authentication, so this needs no credentials and does not
 # touch the claim.
 ssh_banner() {
-    local line=""
+    local line="" rc=0
     exec 3<>/dev/tcp/"$GUEST_IP"/22 2>/dev/null || return 1
-    IFS= read -r -t 5 line <&3 || true
+    IFS= read -r -t 5 line <&3 || rc=$?
     exec 3<&- 3>&- 2>/dev/null || true
+    # Only a complete, terminated line counts.  A read that timed out leaves
+    # whatever bytes had arrived in $line, and half a banner still starts with
+    # "SSH-" -- so checking the prefix alone would accept a truncated one.
+    [ "$rc" -eq 0 ] || return 1
     printf '%s' "$line"
 }
 BANNER=""
