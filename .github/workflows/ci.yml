@@ -416,6 +416,18 @@ jobs:
             ping_linux: true
             uboot_bin: u-boot-hi3516cv300-universal.bin
             flash_mem: 256M
+            # Exercise the HiFMC NOR erase+program path from Linux userspace
+            # (flash_eraseall + flashcp -v). Guards the erase-address/WEL fix
+            # that OpenIPC firstboot & sysupgrade depend on. cv300 stands in
+            # for all hisi-fmc SoCs (the fix is in shared hisi-fmc.c).
+            #
+            # It runs here rather than on ev300 because the test has to claim
+            # the camera to get a shell, and claiming a majestic image means
+            # accepting the Majestic EULA -- which is the owner's to accept,
+            # never CI's. So it needs a majestic-free build, and cv300 is one
+            # of the two SoCs with a published `mini` image.
+            flash_rw: true
+            flash_rw_image: openipc.hi3516cv300-nor-mini.tgz
 
           # cv500 family covers av300 (same die, av300 is variant id 5);
           # one Linux + U-Boot gate exercises both.  flash_mem=1G because
@@ -448,11 +460,6 @@ jobs:
             ping_linux: true
             uboot_bin: u-boot-hi3516ev300-universal.bin
             flash_mem: 128M
-            # Exercise the HiFMC NOR erase+program path from Linux userspace
-            # (flash_eraseall + flashcp -v). Guards the erase-address/WEL fix
-            # that OpenIPC firstboot & sysupgrade depend on. ev300 stands in
-            # for all hisi-fmc SoCs (the fix is in shared hisi-fmc.c).
-            flash_rw: true
 
           # gk7205v500 (Goke V500) full-Linux boot regression gate.
           # The goke V500 OpenIPC kernel uses an "xmsp804" timer
@@ -608,13 +615,26 @@ jobs:
 
       - name: "SPI-NOR erase/program round-trip"
         if: matrix.flash_rw
-        timeout-minutes: 5
+        timeout-minutes: 8
         run: |
+          # A majestic-free image, from OpenIPC/builder: the test claims the
+          # camera to get a shell, and on an image carrying majestic the claim
+          # runs the Majestic EULA first. Accepting that belongs to the
+          # camera's human owner, so the harness refuses to type it and CI
+          # must hand it a `mini` build instead. The nor-lite tarball the
+          # other steps use stays where it is.
+          mkdir -p qemu-boot/flash-rw-img
+          curl -sL "https://github.com/OpenIPC/builder/releases/download/latest/${{ matrix.flash_rw_image }}" \
+              -o "qemu-boot/flash-rw-img/${{ matrix.flash_rw_image }}"
+          tar xzf "qemu-boot/flash-rw-img/${{ matrix.flash_rw_image }}" \
+              -C qemu-boot/flash-rw-img
           bash qemu-boot/test-flash-rw.sh \
             --soc "${{ matrix.soc }}" \
             --machine "${{ matrix.machine }}" \
             --qemu ./qemu-src/build/qemu-system-arm \
             --output-dir "qemu-boot/flash-rw-${{ matrix.soc }}" \
+            --kernel "qemu-boot/flash-rw-img/uImage.${{ matrix.soc }}" \
+            --rootfs "qemu-boot/flash-rw-img/rootfs.squashfs.${{ matrix.soc }}" \
             --mem 128M \
             --login-timeout 120
 
