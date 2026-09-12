@@ -528,13 +528,18 @@ jobs:
           sudo ip link set qbr0 up
           sudo ip link set tap0 up
           sudo ip addr add 10.0.10.1/24 dev qbr0
+          # Second host address, off the guest's subnet on purpose: it is
+          # advertised as the guest's DNS server, so a query only reaches us if
+          # the guest installed and used the default route we handed it.
+          sudo ip addr add 10.0.20.1/24 dev qbr0
           sudo iptables -I INPUT -i qbr0 -j ACCEPT
           # HTTP server for TCP connectivity test (validates TX checksum offload)
           python3 -m http.server 8080 --bind 10.0.10.1 &
           # dnsmasq: DHCP + DNS forwarder on the bridge
-          sudo dnsmasq --interface=qbr0 --bind-interfaces --listen-address=10.0.10.1 \
+          sudo dnsmasq --interface=qbr0 --bind-interfaces \
+            --listen-address=10.0.10.1 --listen-address=10.0.20.1 \
             --dhcp-range=10.0.10.50,10.0.10.99,255.255.255.0,1h \
-            --dhcp-option=3,10.0.10.1 --dhcp-option=6,10.0.10.1 \
+            --dhcp-option=3,10.0.10.1 --dhcp-option=6,10.0.20.1 \
             --no-resolv --server=8.8.8.8 \
             --no-daemon --log-dhcp --log-queries \
             --log-facility=/tmp/dnsmasq-ci.log \
@@ -623,9 +628,9 @@ jobs:
             --mem 128M \
             --timeout 240
 
-      - name: "Linux ping + curl test"
+      - name: "Linux network test"
         if: matrix.ping_linux
-        timeout-minutes: 4
+        timeout-minutes: 6
         run: |
           bash qemu-boot/test-linux-network.sh \
             --soc "${{ matrix.soc }}" \
@@ -634,10 +639,11 @@ jobs:
             --qemu ./qemu-src/build/qemu-system-arm \
             --tap tap0 \
             --host-ip 10.0.10.1 \
-            --login-timeout 120 \
+            --login-timeout 150 \
             --ping-timeout 45 \
-            --curl-timeout 100 \
+            --curl-timeout 60 \
             --curl-max-time 90 \
+            --dns-ip 10.0.20.1 \
             --dnsmasq-log /tmp/dnsmasq-ci.log \
             --output-dir "qemu-boot/linux-network-${{ matrix.soc }}"
 
