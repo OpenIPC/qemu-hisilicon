@@ -1864,6 +1864,40 @@ static const HisiSoCConfig hi3516dv200_soc = {
  *   GK7608V200  4K@60fps  8 TOPS    H.266       (2025)
  */
 
+/*
+ * Stub register banks shared by every Goke V4 die.  Kept as a bare list so the
+ * NPU-equipped next-gen parts can append to it: `.regbanks` is an array and
+ * cannot be partially overridden after the common macro.
+ */
+#define HISI_V4_REGBANK_LIST                                \
+        { "hisi-misc",       0x12028000, 0x8000  },         \
+        { "hisi-ddr",        0x120d0000, 0x10000 },         \
+        { "hisi-iocfg-vio",  0x112c0000, 0x10000 },         \
+        { "hisi-iocfg-core", 0x120c0000, 0x10000 },         \
+        { "hisi-iocfg-ahb",  0x100c0000, 0x10000 },         \
+        { "hisi-pwm",        0x12080000, 0x10000 },         \
+        { "hisi-usb3",       0x10030000, 0x10000 },         \
+        { "hisi-aiao",       0x100e0000, 0x10000 },         \
+        { "hisi-acodec",     0x100f0000, 0x10000 },         \
+        { "hisi-vi-cap",     0x11000000, 0x200000 },        \
+        { "hisi-vi-proc",    0x11200000, 0x40000 },         \
+        { "hisi-vgs",        0x11300000, 0x10000 },         \
+        { "hisi-ive",        0x11320000, 0x10000 },         \
+        { "hisi-vpss",       0x11400000, 0x10000 }
+
+/*
+ * Goke next-gen V500 family (gk7205v500/v510/v530, gk7202v330): V4 banks plus
+ * the NPU at 0x11340000.  Must follow HISI_V4_COMMON_PERIPH.  The EV200/EV300
+ * class dies (gk7205v200/v300, gk7202v300, gk7201v200, gk7605v100) have no
+ * NPU — they do detection on IVE — so they keep the plain V4 list.
+ */
+#define HISI_V4_NPU_REGBANKS                                \
+    .num_regbanks       = 15,                               \
+    .regbanks           = {                                 \
+        HISI_V4_REGBANK_LIST,                               \
+        { "hisi-npu",        0x11340000, 0x10000 },         \
+    }
+
 /* Common V4 peripheral block — shared by all V4 & Goke configs.
  *
  * Memory layout (ram_size_default / kernel_mem_mb / extra_cmdline) is
@@ -1923,24 +1957,8 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .gzip_base          = 0x11310000,                       \
     .hwrng_base         = 0x10080000,                       \
     .hwrng_data_offset  = 0x204,                            \
-    .num_regbanks       = 15,                               \
-    .regbanks           = {                                 \
-        { "hisi-misc",       0x12028000, 0x8000  },         \
-        { "hisi-ddr",        0x120d0000, 0x10000 },         \
-        { "hisi-iocfg-vio",  0x112c0000, 0x10000 },         \
-        { "hisi-iocfg-core", 0x120c0000, 0x10000 },         \
-        { "hisi-iocfg-ahb",  0x100c0000, 0x10000 },         \
-        { "hisi-pwm",        0x12080000, 0x10000 },         \
-        { "hisi-usb3",       0x10030000, 0x10000 },         \
-        { "hisi-aiao",       0x100e0000, 0x10000 },         \
-        { "hisi-acodec",     0x100f0000, 0x10000 },         \
-        { "hisi-vi-cap",     0x11000000, 0x200000 },        \
-        { "hisi-vi-proc",    0x11200000, 0x40000 },         \
-        { "hisi-vgs",        0x11300000, 0x10000 },         \
-        { "hisi-ive",        0x11320000, 0x10000 },         \
-        { "hisi-npu",        0x11340000, 0x10000 },         \
-        { "hisi-vpss",       0x11400000, 0x10000 },         \
-    }
+    .num_regbanks       = 14,                               \
+    .regbanks           = { HISI_V4_REGBANK_LIST }
 
 /* Per-die DDR layouts shared by V4 and Goke variants.
  * V4_DDR_64M:  on-chip 512Mb DDR2 (EV200-class dies)
@@ -2033,6 +2051,7 @@ static const HisiSoCConfig gk7205v500_soc = {
     .gpio_count         = 8,
     HISI_V4_DDR_64M,                /* 512Mb DDR2 MCP */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_NPU_REGBANKS,
     .xmsp804_timer      = true,     /* goke V500 kernel uses xmedia,sp804 */
 };
 
@@ -2043,6 +2062,7 @@ static const HisiSoCConfig gk7205v510_soc = {
     .gpio_count         = 8,
     HISI_V4_DDR_128M,               /* 1Gb DDR3 MCP */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_NPU_REGBANKS,
     .xmsp804_timer      = true,     /* goke V500 kernel uses xmedia,sp804 */
 };
 
@@ -2053,6 +2073,7 @@ static const HisiSoCConfig gk7205v530_soc = {
     .gpio_count         = 8,
     HISI_V4_DDR_128M,               /* external DDR, 128 MiB typical */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_NPU_REGBANKS,
     .xmsp804_timer      = true,     /* goke V500 kernel uses xmedia,sp804 */
 };
 
@@ -2063,6 +2084,7 @@ static const HisiSoCConfig gk7202v330_soc = {
     .gpio_count         = 8,
     HISI_V4_DDR_64M,                /* 512Mb DDR2 MCP */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_NPU_REGBANKS,
     .xmsp804_timer      = true,     /* same GK7205V500 register family / goke V500 kernel */
 };
 
