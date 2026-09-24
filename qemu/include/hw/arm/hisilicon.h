@@ -415,6 +415,7 @@ typedef struct HisiSoCConfig {
 #define GOKE_SOC_ID_7205V300    0x72050300  /* = hi3516ev300 */
 #define GOKE_SOC_ID_7202V300    0x72020300  /* = hi3518ev300 */
 #define GOKE_SOC_ID_7605V100    0x76050100  /* = hi3516dv200 */
+#define GOKE_SOC_ID_7201V200    0x72010200  /* ~hi3516ev200 stripped (1M/2M IPC) */
 
 /* Goke next-gen — own design, V4-compatible address map + NPU (2022+) */
 #define GOKE_SOC_ID_7205V500    0x72050500  /* 5M, 0.5 TOPS, 512Mb DDR2 */

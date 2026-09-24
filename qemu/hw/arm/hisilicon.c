@@ -1968,6 +1968,23 @@ static const HisiSoCConfig gk7205v200_soc = {
     HISI_V4_COMMON_PERIPH,
 };
 
+/*
+ * GK7201V200 — a cut-down Hi3516EV200-class ("stripped EV200") Goke die,
+ * die-identical V4 silicon on the standard 0x12xxxxxx control block.  Seen on
+ * Xiongmai IPC_GK7201V200_G3H_S38 boards (8 MB NOR, 64 MB DDR2, MIS2008 sensor,
+ * kernel 4.9.37).  chip id 0x72010200 (verified live via ipctool + SCSYSID0).
+ * Everything comes from the shared V4 macro; only name/desc/soc_id differ from
+ * gk7205v200.  No default sensor: the board's MIS2008 has no i2c model yet.
+ */
+static const HisiSoCConfig gk7201v200_soc = {
+    .name               = "gk7201v200",
+    .desc               = "Goke GK7201V200 (Cortex-A7, ~Hi3516EV200 stripped)",
+    .soc_id             = GOKE_SOC_ID_7201V200,
+    .gpio_count         = 8,
+    HISI_V4_DDR_64M,                /* 512Mb DDR2 */
+    HISI_V4_COMMON_PERIPH,
+};
+
 static const HisiSoCConfig gk7205v300_soc = {
     .name               = "gk7205v300",
     .desc               = "Goke GK7205V300 (Cortex-A7, ~Hi3516EV300)",
@@ -4208,6 +4225,7 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
 
     hwaddr flash_src = c->fmc_mem_base;         /* e.g. 0x14000000 */
     hwaddr ram_dst   = c->ram_base;             /* e.g. 0x40000000 */
+    hwaddr uboot_entry = 0;   /* jump target; defaults to ram_dst (set below) */
     /*
      * Boot partition copy size.  Vendor U-Boot binaries vary widely:
      * Hi3516CV100 ≈ 130 KB, Hi3516EV200 ≈ 230 KB, Goke V4 ≈ 515 KB.
@@ -4269,6 +4287,82 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
             const uint32_t *w = (const uint32_t *)data;
             size_t nwords = len / 4;
             /*
+             * XM/Xiongmai V4 "reg-config" boot header (e.g. gk7201v200):
+             * flash offset 0 is three `b .` reset stubs (0xeafffffe) + an
+             * 8-word 0xdeadbeef magic run + a CRG (0x1201xxxx) register-init
+             * table — not a reset branch and not a load descriptor.  The real
+             * u-boot load descriptor sits *after* the table as a short
+             * `…<entry> … 0xdeadbeef 0xdeadbeef <load_base> …` block, with the
+             * DRAM entry word two slots ahead of the marker run and the u-boot
+             * image (a 0x40-byte header then code) following it.  The generic
+             * scan below misses this: the leading 8-word run is followed by a
+             * CRG register (not a DRAM addr), and this descriptor's own run is
+             * only 2 words.  Detect the signature and resolve it explicitly.
+             */
+            bool xm_handled = false;
+            if (nwords > 16 &&
+                le32_to_cpu(w[0]) == 0xeafffffe &&
+                le32_to_cpu(w[3]) == 0xdeadbeef &&
+                (le32_to_cpu(w[11]) & 0xffff0000) == 0x12010000) {
+                size_t xscan = MIN(nwords, (size_t)(0x8000 / 4));
+                for (size_t r = 12; r + 3 < xscan; r++) {
+                    if (le32_to_cpu(w[r]) != 0xdeadbeef) {
+                        continue;
+                    }
+                    size_t run = 0;
+                    while (r + run < xscan &&
+                           le32_to_cpu(w[r + run]) == 0xdeadbeef) {
+                        run++;
+                    }
+                    /*
+                     * The load descriptor is the z-stage start.S literal pool:
+                     * a `.balignl 16,0xdeadbeef` gap followed by _TEXT_BASE,
+                     * _clr_remap_fmc_entry (a pointer into the FMC NOR window)
+                     * and _start_armboot.  Require that exact shape so we don't
+                     * latch onto an incidental 0xdeadbeef word in the reg table.
+                     */
+                    if (r + run + 3 >= xscan) {
+                        break;      /* descriptor + code would run off the image */
+                    }
+                    uint32_t text_base = le32_to_cpu(w[r + run]);
+                    uint32_t fmc_entry = le32_to_cpu(w[r + run + 1]);
+                    uint32_t armboot   = le32_to_cpu(w[r + run + 2]);
+                    hwaddr reset_off   = (hwaddr)(r + run + 3) * 4;
+                    /* The whole copy (and so the entry inside it) must land in
+                     * the RAM this machine actually maps. */
+                    const hwaddr xm_copy_sz = 0x40000;   /* boot partition */
+                    if ((text_base & 0xffff) == 0 &&
+                        text_base >= c->ram_base &&
+                        machine->ram_size >= xm_copy_sz &&
+                        text_base - c->ram_base <=
+                            machine->ram_size - xm_copy_sz &&
+                        reset_off < xm_copy_sz &&
+                        fmc_entry >= c->fmc_mem_base &&
+                        (fmc_entry - c->fmc_mem_base) < 0x1000000 &&
+                        armboot >= c->ram_base &&
+                        armboot - c->ram_base < machine->ram_size) {
+                        /*
+                         * QEMU's FMC NOR window is MMIO (not executable), so the
+                         * z-stage cannot run execute-in-place from flash as it
+                         * does under the mask ROM.  Copy the boot partition from
+                         * flash 0 to _TEXT_BASE (the u-boot.lds link base,
+                         * TEXT_BASE_ORI) and enter the `reset` handler, which
+                         * follows the 3-word descriptor pool (_TEXT_BASE,
+                         * _clr_remap_fmc_entry, _start_armboot); the factory
+                         * `_start` word at flash 0 is a dead `b .`.  fmc_entry is
+                         * only used as part of the signature.
+                         */
+                        flash_src   = c->fmc_mem_base;        /* flash 0       */
+                        ram_dst     = text_base;              /* TEXT_BASE_ORI */
+                        uboot_entry = text_base + reset_off;  /* reset handler */
+                        copy_sz     = xm_copy_sz;
+                        xm_handled  = true;
+                        break;
+                    }
+                    r += run;
+                }
+            }
+            /*
              * The loader self-descriptor is a run of >= 4 0xdeadbeef marker
              * words immediately followed by the loader's absolute load
              * address.  The loader block (its ARM reset-vector word) begins
@@ -4287,7 +4381,7 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
              */
             const size_t MIN_RUN = 4;
             size_t scan = MIN(nwords, (size_t)(0x40000 / 4));  /* first 256 KiB */
-            for (size_t i = 0; i + MIN_RUN <= scan; i++) {
+            for (size_t i = 0; !xm_handled && i + MIN_RUN <= scan; i++) {
                 if (le32_to_cpu(w[i]) != 0xdeadbeef) {
                     continue;
                 }
@@ -4330,6 +4424,13 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
         }
     }
 
+    /* Jump target defaults to the copy destination unless a descriptor set a
+     * distinct entry (e.g. the XM reg-config header, whose image carries a
+     * 0x40-byte header ahead of its entry). */
+    if (!uboot_entry) {
+        uboot_entry = ram_dst;
+    }
+
     /*
      * Build a small boot ROM that copies U-Boot from the SPI NOR flash
      * memory window to DDR and jumps to it.
@@ -4362,9 +4463,9 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
         rom[n++] = cpu_to_le32(0xe1510003);     /* cmp r1, r3             */
         rom[n++] = cpu_to_le32(0x1afffffb);     /* bne copy_loop          */
 
-        /* Jump to DDR */
-        rom[n++] = cpu_to_le32(arm_movw(1, ram_dst & 0xffff));
-        rom[n++] = cpu_to_le32(arm_movt(1, ram_dst >> 16));
+        /* Jump to U-Boot entry (== ram_dst unless a descriptor set one) */
+        rom[n++] = cpu_to_le32(arm_movw(1, uboot_entry & 0xffff));
+        rom[n++] = cpu_to_le32(arm_movt(1, uboot_entry >> 16));
         rom[n++] = cpu_to_le32(0xe12fff11);     /* bx r1                  */
     } else {
         /*
@@ -5775,6 +5876,7 @@ DEFINE_HISI_MACHINE("hi3516ev200", hi3516ev200, hi3516ev200_soc)
 DEFINE_HISI_MACHINE("hi3518ev300", hi3518ev300, hi3518ev300_soc)
 DEFINE_HISI_MACHINE("hi3516dv200", hi3516dv200, hi3516dv200_soc)
 DEFINE_HISI_MACHINE("gk7205v200", gk7205v200, gk7205v200_soc)
+DEFINE_HISI_MACHINE("gk7201v200", gk7201v200, gk7201v200_soc)
 DEFINE_HISI_MACHINE("gk7205v300", gk7205v300, gk7205v300_soc)
 DEFINE_HISI_MACHINE("gk7202v300", gk7202v300, gk7202v300_soc)
 DEFINE_HISI_MACHINE("gk7605v100", gk7605v100, gk7605v100_soc)
