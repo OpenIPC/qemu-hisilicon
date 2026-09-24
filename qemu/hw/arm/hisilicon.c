@@ -1987,12 +1987,30 @@ static const HisiSoCConfig gk7205v200_soc = {
 };
 
 /*
- * GK7201V200 — a cut-down Hi3516EV200-class ("stripped EV200") Goke die,
- * die-identical V4 silicon on the standard 0x12xxxxxx control block.  Seen on
- * Xiongmai IPC_GK7201V200_G3H_S38 boards (8 MB NOR, 64 MB DDR2, MIS2008 sensor,
- * kernel 4.9.37).  chip id 0x72010200 (verified live via ipctool + SCSYSID0).
- * Everything comes from the shared V4 macro; only name/desc/soc_id differ from
- * gk7205v200.  No default sensor: the board's MIS2008 has no i2c model yet.
+ * GK7201V200 — the low-end binning of the Hi3516EV200-class die that
+ * GK7205V200 is built on: same 0x12xxxxxx V4 control block and the same
+ * package (QFN 9x9 mm, 88 pins), with feature tiers cut.  Per the Goke
+ * GK7205V200 datasheet v1.1 and the vendor GK7201V200 spec sheet:
+ *
+ *                     GK7205V200                 GK7201V200
+ *   CPU               Cortex-A7 @ 900 MHz        Cortex-A7 @ 600 MHz
+ *   Encoder max       2304x1296                  2304x1296 @ 15 fps
+ *                                                (or 2x1080p + 2x360p @ 15)
+ *   Sensor input      MIPI / LVDS / HiSPI        MIPI 2-lane (1.5 Gbps) + DVP
+ *   Video output      LCD, BT656/BT1120          none
+ *   Common            512 Mb embedded DDR2, FE PHY, USB 2.0, SDIO + SD,
+ *                     audio codec, IVE; no NPU on either
+ *
+ * The cuts are rated limits and unbonded interfaces, not a different memory
+ * map, so everything comes from the shared V4 macros; only name/desc/soc_id
+ * differ from gk7205v200.  In practice the 600 MHz rating is soft: the stock
+ * Xiongmai firmware on IPC_GK7201V200_G3H_S38 boards programs the A7 PLL to
+ * 900 MHz (ipctool).  Those boards carry 8 MB NOR, the 64 MB DDR2, a MIS2008
+ * sensor and kernel 4.9.37; chip id 0x72010200 was verified live via ipctool
+ * and SCSYSID0.  The vendor XMedia kernel runs it on the EV200-class platform
+ * (CONFIG_ARCH_XM72050200), while OpenIPC ships the userland MPP drivers from
+ * its goke-osdrv-gk7205v500 (xm_*) package.  No default sensor: the MIS2008
+ * has no i2c model yet.
  */
 static const HisiSoCConfig gk7201v200_soc = {
     .name               = "gk7201v200",
