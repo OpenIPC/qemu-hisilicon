@@ -1974,15 +1974,13 @@ static const HisiSoCConfig gk7205v200_soc = {
  * Xiongmai IPC_GK7201V200_G3H_S38 boards (8 MB NOR, 64 MB DDR2, MIS2008 sensor,
  * kernel 4.9.37).  chip id 0x72010200 (verified live via ipctool + SCSYSID0).
  * Everything comes from the shared V4 macro; only name/desc/soc_id differ from
- * gk7205v200.  Default sensor left as imx307 (a supported EV200-die default)
- * until an mis2008 i2c model lands; boot the stock dump with sensor=none.
+ * gk7205v200.  No default sensor: the board's MIS2008 has no i2c model yet.
  */
 static const HisiSoCConfig gk7201v200_soc = {
     .name               = "gk7201v200",
     .desc               = "Goke GK7201V200 (Cortex-A7, ~Hi3516EV200 stripped)",
     .soc_id             = GOKE_SOC_ID_7201V200,
     .gpio_count         = 8,
-    .default_sensor     = "imx307",
     HISI_V4_DDR_64M,                /* 512Mb DDR2 */
     HISI_V4_COMMON_PERIPH,
 };
@@ -4323,38 +4321,41 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
                      * and _start_armboot.  Require that exact shape so we don't
                      * latch onto an incidental 0xdeadbeef word in the reg table.
                      */
+                    if (r + run + 3 >= xscan) {
+                        break;      /* descriptor + code would run off the image */
+                    }
                     uint32_t text_base = le32_to_cpu(w[r + run]);
                     uint32_t fmc_entry = le32_to_cpu(w[r + run + 1]);
                     uint32_t armboot   = le32_to_cpu(w[r + run + 2]);
+                    hwaddr reset_off   = (hwaddr)(r + run + 3) * 4;
+                    /* The whole copy (and so the entry inside it) must land in
+                     * the RAM this machine actually maps. */
+                    const hwaddr xm_copy_sz = 0x40000;   /* boot partition */
                     if ((text_base & 0xffff) == 0 &&
                         text_base >= c->ram_base &&
-                        (text_base - c->ram_base) < 0x20000000 &&
+                        machine->ram_size >= xm_copy_sz &&
+                        text_base - c->ram_base <=
+                            machine->ram_size - xm_copy_sz &&
+                        reset_off < xm_copy_sz &&
                         fmc_entry >= c->fmc_mem_base &&
                         (fmc_entry - c->fmc_mem_base) < 0x1000000 &&
                         armboot >= c->ram_base &&
-                        (armboot - c->ram_base) < 0x20000000) {
+                        armboot - c->ram_base < machine->ram_size) {
                         /*
-                         * QEMU's FMC NOR window is MMIO (not executable), so we
-                         * cannot run the z-stage execute-in-place from flash the
-                         * way the mask ROM does.  Instead mirror what the ROM
-                         * achieves: copy the image from flash 0 to its link base
-                         * _TEXT_BASE (== __image_copy_start == _start, per
-                         * u-boot.lds) and enter the `reset` handler, which sits
-                         * right after the 3-word descriptor pool (_TEXT_BASE,
-                         * _clr_remap_fmc_entry, _start_armboot).  Running from
-                         * DDR, start.S takes the no_ddr_init path and copy_to_ddr
-                         * finds `adrl _start` == __image_copy_start, so
-                         * `beq start_armboot` skips its (else overlapping) self
-                         * copy; start_armboot() HW-gunzips the real U-Boot to
-                         * CONFIG_SYS_TEXT_BASE (0x40800000) and enters it.
-                         * (fmc_entry is validated but only used as a signature;
-                         * the factory `_start` word at flash 0 is a dead `b .`.)
+                         * QEMU's FMC NOR window is MMIO (not executable), so the
+                         * z-stage cannot run execute-in-place from flash as it
+                         * does under the mask ROM.  Copy the boot partition from
+                         * flash 0 to _TEXT_BASE (the u-boot.lds link base,
+                         * TEXT_BASE_ORI) and enter the `reset` handler, which
+                         * follows the 3-word descriptor pool (_TEXT_BASE,
+                         * _clr_remap_fmc_entry, _start_armboot); the factory
+                         * `_start` word at flash 0 is a dead `b .`.  fmc_entry is
+                         * only used as part of the signature.
                          */
-                        hwaddr reset_off = (hwaddr)(r + run + 3) * 4;
                         flash_src   = c->fmc_mem_base;        /* flash 0       */
-                        ram_dst     = text_base;              /* 0x40700000    */
+                        ram_dst     = text_base;              /* TEXT_BASE_ORI */
                         uboot_entry = text_base + reset_off;  /* reset handler */
-                        copy_sz     = 0x40000;                /* boot part.    */
+                        copy_sz     = xm_copy_sz;
                         xm_handled  = true;
                         break;
                     }
