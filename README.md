@@ -5,10 +5,10 @@ targeting QEMU v10.2.0. Boots unmodified [OpenIPC](https://openipc.org/) firmwar
 and vendor SDK kernels to a full Linux userspace on all supported platforms.
 
 Builds two QEMU targets:
-- `qemu-system-arm` — 29 IPC + 11 DVR/NVR + 1 STB (ARMv7-A)
+- `qemu-system-arm` — 30 IPC + 11 DVR/NVR + 1 STB (ARMv7-A)
 - `qemu-system-aarch64` — 3 IPC + 1 STB (ARMv8-A, Cortex-A53/A55)
 
-## Supported Machines (45 total)
+## Supported Machines (46 total)
 
 ### IPC family — V1 through V5 (`qemu-system-arm`)
 
@@ -32,6 +32,7 @@ Builds two QEMU targets:
 | `hi3518ev300` | V4 | Cortex-A7 | GIC | — | — |
 | `hi3516dv200` | V4 | Cortex-A7 | GIC | — | — |
 | `gk7205v200` | V4/Goke | Cortex-A7 | GIC | — | — |
+| `gk7201v200` | V4/Goke | Cortex-A7 | GIC | — | — |
 | `gk7205v300` | V4/Goke | Cortex-A7 | GIC | — | — |
 | `gk7202v300` | V4/Goke | Cortex-A7 | GIC | — | — |
 | `gk7605v100` | V4/Goke | Cortex-A7 | GIC | — | — |
@@ -99,7 +100,7 @@ placeholder: it builds and registers, but does not boot yet. Much of its config
 is inherited from GK7206 and several values — DDR size among them — are still
 unverified against the vendor SDK.
 
-All 45 machines build and register. Every machine marked "yes" above boots
+All 46 machines build and register. Every machine marked "yes" above boots
 OpenIPC or vendor firmware to a shell prompt (artifacts/scripts staged in
 `qemu-boot/run-<machine>.sh`); `-machine help` on either binary is the
 authoritative list.
