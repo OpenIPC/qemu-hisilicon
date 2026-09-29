@@ -34,7 +34,7 @@ Goke chips are die-identical HiSilicon V4 silicon with different branding:
 | gk7202v300 | hi3518ev300 | `0x72020300` |
 | gk7605v100 | hi3516dv200 | `0x76050100` |
 | gk7201v200 | (~ev200 stripped) | `0x72010200` |
-| gk7201v300 | (~ev300 stripped) | `0x72010300` |
+| gk7201v300 | (~ev200 stripped, re-ID of gk7201v200) | `0x72010300` |
 | gk7202v330 | (~18ev300 variant) | `0x72020330` |
 | gk7205v500 | (new gen) | `0x72050500` |
 | gk7205v510 | (new gen) | `0x72050510` |
