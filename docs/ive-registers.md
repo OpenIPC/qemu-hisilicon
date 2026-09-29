@@ -4,6 +4,13 @@ Register dump captured from live hardware during motion detection.
 Board: EV300 (`IVG85HG50PYA-S.dlab.doty.ru`), OpenIPC firmware.
 Method: `/dev/mem` mmap of 0x11320000 (64KB), polling during `HI_IVS_MD_Process()`.
 
+This capture reads the `0x0100` parameter window during motion detection. Note
+that the working clean-room driver (`OpenIPC/openhisilicon` `kernel/ive_neo`)
+configures operations through **DRAM task-node descriptors** kicked at `0x00`
+(fire) / `0x10` (node chain), not by writing this `0x0100` block — see
+[`xnn-registers.md`](xnn-registers.md), which covers the XNN dispatch model and
+where the full conv/fc decode lives.
+
 ## Hardware Details
 
 | Property | Value |
