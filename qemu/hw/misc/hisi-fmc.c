@@ -68,6 +68,8 @@
 
 /* FMC_OP_CFG bits */
 #define FMC_OP_CFG_FM_CS_SHIFT  11
+#define FMC_OP_CFG_MEM_IF_SHIFT 7
+#define FMC_OP_CFG_MEM_IF_MASK  (0x7 << FMC_OP_CFG_MEM_IF_SHIFT)
 #define FMC_OP_CFG_FM_CS_MASK   (0x3 << FMC_OP_CFG_FM_CS_SHIFT)
 
 /* FMC_OP_CTRL bits */
@@ -275,6 +277,14 @@ struct HisiFmcState {
      * default already-unlocked-by-runtime-firmware behaviour.  See
      * openhisilicon#83. */
     bool     nor_wps_locked;
+
+    /* When true, the NOR answers only single-I/O reads: a DMA read issued
+     * with any dual or quad interface type returns zeros, while writes,
+     * erases and register ops keep working.  Mirrors the 0xc22017 part on
+     * some Xiongmai hi3518ev200 boards, where every multi-I/O read comes
+     * back blank and the kernel cannot find its root filesystem.  See
+     * OpenIPC/firmware#646. */
+    bool     nor_single_io_only;
 
     /* Register-mode I/O buffer (shared via memory window) */
     bool     iobuf_valid;         /* true after reg-mode op, cleared on next read */
@@ -793,7 +803,16 @@ static void hisi_fmc_exec_dma_nor(HisiFmcState *s)
         return;
     }
 
-    if (!is_write) {
+    if (!is_write && s->nor_single_io_only &&
+        (s->op_cfg & FMC_OP_CFG_MEM_IF_MASK)) {
+        qemu_log_mask(LOG_GUEST_ERROR,
+                      "hisi-fmc: multi-I/O DMA read (OP_CFG=0x%x) on a "
+                      "single-I/O-only NOR, returning zeros\n", s->op_cfg);
+        uint8_t *blank = g_malloc0(len);
+        dma_memory_write(&address_space_memory, dma_addr,
+                         blank, len, MEMTXATTRS_UNSPECIFIED);
+        g_free(blank);
+    } else if (!is_write) {
         dma_memory_write(&address_space_memory, dma_addr,
                          &s->flash[addr], len, MEMTXATTRS_UNSPECIFIED);
     } else {
@@ -1332,6 +1351,10 @@ static const Property hisi_fmc_properties[] = {
      * preserves the existing already-unlocked behaviour.  See
      * openhisilicon#83. */
     DEFINE_PROP_BOOL("nor-wps-locked", HisiFmcState, nor_wps_locked, false),
+    /* Answer only single-I/O reads, like the NOR on the board in
+     * OpenIPC/firmware#646.  Default off. */
+    DEFINE_PROP_BOOL("nor-single-io-only", HisiFmcState, nor_single_io_only,
+                     false),
 };
 
 static void hisi_fmc_class_init(ObjectClass *klass, const void *data)

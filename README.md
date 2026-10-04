@@ -283,6 +283,26 @@ A test passes only if the firmware actually issues the unlock
 sequence — without the knob, the same firmware silently "works"
 against an emulator that never had the lock to begin with.
 
+#### Single-I/O-only NOR (dual-read fallback testing)
+
+Some Xiongmai hi3518ev200 boards carry a `0xc22017` NOR (sold as
+MX25L6406E/MX25L6436F) that answers only plain single-I/O reads: every
+dual- or quad-I/O read comes back as zeros, while writes, erases and
+status reads keep working. Stock U-Boot then fails with
+`Wrong Image Format for bootm command`, and a kernel booted another way
+panics with `VFS: Unable to mount root fs`
+([OpenIPC/firmware#646](https://github.com/OpenIPC/firmware/issues/646)).
+
+`hisi-fmc.nor-single-io-only=on` (default `off`) reproduces that chip:
+a DMA read whose `OP_CFG` interface type is anything but standard
+returns zeros and logs a `guest_errors` line.
+
+```bash
+qemu-system-arm -M hi3516cv200,flash-file=$flash -m 64M -nographic \
+    -global hisi-fmc.flash-jedec=0xc22017 \
+    -global hisi-fmc.nor-single-io-only=on
+```
+
 #### SPI-NAND flash boot (UBI/UBIFS)
 
 `hisi-fmc` also models a SPI-NAND chip (GigaDevice GD5F1GM7 by default:
