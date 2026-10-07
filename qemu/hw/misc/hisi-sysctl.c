@@ -13,6 +13,7 @@
 #include "qemu/osdep.h"
 #include "qapi/error.h"
 #include "hw/sysbus.h"
+#include "hw/irq.h"
 #include "hw/qdev-properties.h"
 #include "qemu/log.h"
 #include "system/runstate.h"
@@ -30,6 +31,13 @@ OBJECT_DECLARE_SIMPLE_TYPE(HisiSysctlState, HISI_SYSCTL)
 
 /* Number of 32-bit general-purpose storage words */
 #define HISI_SYSCTL_NREGS       (HISI_SYSCTL_MMIO_SIZE / 4)
+
+/*
+ * SC_CTRL bit 8: set by the mask-ROM's final handoff thunk to drop the
+ * reset-time alias of the mask-ROM at address 0 (openhisilicon
+ * bootrom/hi3516av300/re/start.S, clear_remap_start).  Cleared by reset.
+ */
+#define SC_CTRL_REMAP_CLEAR     (1 << 8)
 
 struct HisiSysctlState {
     SysBusDevice parent_obj;
@@ -53,6 +61,7 @@ struct HisiSysctlState {
     uint32_t v1_chip_id_88;
     uint32_t v1_chip_id_8c;
     uint32_t regs[HISI_SYSCTL_NREGS];
+    qemu_irq remap_clear;       /* SC_CTRL bit 8 level */
 };
 
 static uint64_t hisi_sysctl_read(void *opaque, hwaddr offset, unsigned size)
@@ -118,6 +127,10 @@ static void hisi_sysctl_write(void *opaque, hwaddr offset,
                       (uint32_t)val);
         qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
         break;
+    case 0x00: /* SC_CTRL */
+        s->regs[0] = (uint32_t)val;
+        qemu_set_irq(s->remap_clear, !!(val & SC_CTRL_REMAP_CLEAR));
+        break;
     case 0x88: /* V1 chip ID register — read-only, drop writes */
         break;
     default:
@@ -143,6 +156,19 @@ static void hisi_sysctl_init(Object *obj)
     memory_region_init_io(&s->iomem, obj, &hisi_sysctl_ops, s,
                           TYPE_HISI_SYSCTL, HISI_SYSCTL_MMIO_SIZE);
     sysbus_init_mmio(SYS_BUS_DEVICE(obj), &s->iomem);
+    qdev_init_gpio_out_named(DEVICE(obj), &s->remap_clear, "remap-clear", 1);
+}
+
+static void hisi_sysctl_reset(DeviceState *dev)
+{
+    HisiSysctlState *s = HISI_SYSCTL(dev);
+
+    /*
+     * Only the boot remap returns to its reset value; the other words
+     * keep what machine init stored (e.g. the SYSSTAT boot straps).
+     * Whoever consumes "remap-clear" restores its own reset state.
+     */
+    s->regs[0] &= ~SC_CTRL_REMAP_CLEAR;
 }
 
 static const Property hisi_sysctl_properties[] = {
@@ -157,6 +183,7 @@ static void hisi_sysctl_class_init(ObjectClass *klass, const void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     device_class_set_props(dc, hisi_sysctl_properties);
+    device_class_set_legacy_reset(dc, hisi_sysctl_reset);
 }
 
 static const TypeInfo hisi_sysctl_info = {

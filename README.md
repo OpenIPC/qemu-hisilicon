@@ -22,8 +22,8 @@ Builds two QEMU targets:
 | `hi3516av100` | V2A | Cortex-A7 | GIC | 4.9.37 | yes |
 | `hi3516dv100` | V2A | Cortex-A7 | GIC | 4.9.37 | yes |
 | `hi3516cv300` | V3 | ARM926EJ-S | VIC | 3.18.20 | yes |
-| `hi3516cv500` | V3.5 | Cortex-A7 | GIC | 4.9.37 | yes |
-| `hi3516dv300` | V4A | Cortex-A7 | GIC | 4.9.37 | yes |
+| `hi3516cv500` | V3.5 | Cortex-A7 ×2 | GIC | 4.9.37 | yes |
+| `hi3516dv300` | V4A | Cortex-A7 ×2 | GIC | 4.9.37 | yes |
 | `hi3516av300` | V4A | Cortex-A7 ×2 | GIC | 4.9.37 | yes |
 | `hi3519v101` | V3A | Cortex-A7 | GIC | 3.18.20 | yes |
 | `hi3516av200` | V3A | Cortex-A7 | GIC | 3.18.20 | yes |
@@ -54,6 +54,14 @@ them with; they build and register. The four Goke V500 parts share the
 `qemu-boot/run-gk7206.sh` for an initramfs boot or `FLASH=1` for a SPI-NOR
 boot with a jffs2 root. No vendor artifacts are committed here; see the script
 header for how to build them from the SDK.
+
+The three dual-core Cortex-A7 parts (`hi3516cv500`, `hi3516dv300`,
+`hi3516av300`) boot both cores with `-smp 2`, from `-kernel` and from a
+`flash-file` image alike. As on silicon, the kernel writes a reset trampoline
+at physical 0 and clears CPU1's soft-reset bit in CRG `REG_CPU_SRST_CRG`
+(0x78), and that bit drives CPU1's power state. The default is still one CPU.
+The other "MP2" parts leave CPU1 offline: their vendor release methods are not
+modelled yet.
 
 ### DVR/NVR family — surveillance back-end SoCs (`qemu-system-arm`)
 

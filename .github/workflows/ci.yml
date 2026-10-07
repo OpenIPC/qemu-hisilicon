@@ -43,6 +43,9 @@ jobs:
       - name: SPI-NAND erase/program addressing (hisi-fmc)
         run: bash qemu/tests/test-hisi-fmc-nand-erase.sh
 
+      - name: CPU1 release via CRG soft-reset (hisi-crg, -bios path)
+        run: bash qemu/tests/test-hisi-smp-release.sh
+
       - name: Upload QEMU binary
         uses: actions/upload-artifact@v4
         with:
@@ -430,6 +433,8 @@ jobs:
             soc: hi3516cv500
             machine: hi3516cv500
             append: "console=ttyAMA0,115200 earlyprintk root=/dev/ram0 rootfstype=squashfs mtdparts=hi_sfc:256k(boot),64k(env),3072k(kernel),10240k(rootfs),-(rootfs_data)"
+            # Dual Cortex-A7: CPU1 released through CRG REG_CPU_SRST_CRG (#34)
+            smp: 2
             ping_linux: true
             uboot_bin: u-boot-hi3516cv500-universal.bin
             flash_mem: 1G
@@ -578,7 +583,7 @@ jobs:
           # the rest of init runs deterministically.
           QEMU=./qemu-src/build/qemu-system-arm
           timeout 120 $QEMU \
-            -M ${{ matrix.machine }} \
+            -M ${{ matrix.machine }} -smp ${{ matrix.smp || 1 }} \
             -kernel "qemu-boot/uImage.${{ matrix.soc }}" \
             -initrd "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" \
             -nographic -serial mon:stdio \
@@ -608,6 +613,19 @@ jobs:
                 exit 1
               fi
               echo "=== Chip-id detection OK ==="
+
+              # Regression: #34 — secondary CPUs must come online, not
+              # time out and leave the kernel on CPU0 alone.
+              SMP=${{ matrix.smp || 1 }}
+              if [ "$SMP" -gt 1 ]; then
+                if grep -q "failed to come online" boot-output.txt ||
+                   ! grep -q "Brought up $SMP CPUs" boot-output.txt; then
+                  echo "=== FAIL: SMP bringup broken (#34) ==="
+                  grep -nE "CPU[0-9]+:|Brought up" boot-output.txt
+                  exit 1
+                fi
+                echo "=== SMP bringup OK: $SMP CPUs ==="
+              fi
               exit 0
             fi
             sleep 1
