@@ -637,6 +637,21 @@ jobs:
           kill $QEMU_PID 2>/dev/null || true
           exit 1
 
+      - name: "Guest clock runs at wall-clock speed"
+        timeout-minutes: 5
+        # The login prompt appears even when the guest timebase disagrees
+        # with the rate the DTB gives the kernel (SP804 vs clk_3m, generic
+        # timer vs arm,armv7-timer clock-frequency), so assert it directly:
+        # init=/bin/sh, /proc/uptime sampled 20 s of host time apart.
+        run: |
+          python3 qemu-boot/test-guest-clock.py \
+            --qemu ./qemu-src/build/qemu-system-arm \
+            --machine "${{ matrix.machine }}" \
+            --smp ${{ matrix.smp || 1 }} \
+            --kernel "qemu-boot/uImage.${{ matrix.soc }}" \
+            --initrd "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" \
+            --log "qemu-boot/guest-clock-${{ matrix.soc }}.log"
+
       - name: "SPI-NOR erase/program round-trip"
         if: matrix.flash_rw
         timeout-minutes: 8
@@ -651,7 +666,13 @@ jobs:
 
       - name: "Linux network test"
         if: matrix.ping_linux
-        timeout-minutes: 6
+        timeout-minutes: 8
+        # --ping-timeout is the wait for dropbear's banner on :22.  In
+        # practice the banner only arrives once load_hisilicon finishes;
+        # with guest time at wall-clock speed that is ~70 s after the DHCP
+        # lease on hi3519v101 (its generic timer used to run 2.6x fast,
+        # which hid the vendor modules' timed waits).  The loop exits on
+        # the first banner, so the larger budget costs fast SoCs nothing.
         run: |
           bash qemu-boot/test-linux-network.sh \
             --soc "${{ matrix.soc }}" \
@@ -661,7 +682,7 @@ jobs:
             --tap tap0 \
             --host-ip 10.0.10.1 \
             --login-timeout 150 \
-            --ping-timeout 45 \
+            --ping-timeout 150 \
             --curl-timeout 60 \
             --curl-max-time 90 \
             --dns-ip 10.0.20.1 \
@@ -794,6 +815,7 @@ jobs:
             boot-output.txt
             qemu-boot/qemu.log
             qemu-boot/linux-network-${{ matrix.soc }}
+            qemu-boot/guest-clock-${{ matrix.soc }}.log
             /tmp/*-ping.txt
             /tmp/linux-network-summary.txt
           retention-days: 7
