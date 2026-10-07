@@ -83,10 +83,12 @@ def main():
         print(bytes(buf[-1500:]).decode(errors='replace'))
         sys.exit(1)
 
-    # /bin/sh as PID 1 prints this once it owns the console.
-    if not read_until(lambda b: re.search(rb'job control turned off.*# $',
-                                          bytes(b).replace(b'\r', b''),
-                                          re.S), args.boot_timeout):
+    # /bin/sh as PID 1 prints this once it owns the console.  Don't wait
+    # for the prompt itself: late kernel messages can follow it, so the
+    # buffer need not end with "# ".  The /proc round trip below is the
+    # real readiness check; it retries in case early keystrokes are lost.
+    if not read_until(lambda b: b'job control turned off' in b,
+                      args.boot_timeout):
         fail('no shell within %.0f s' % args.boot_timeout)
     for _ in range(5):
         send('mount -t proc proc /proc 2>/dev/null; '
