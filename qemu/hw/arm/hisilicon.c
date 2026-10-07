@@ -47,6 +47,8 @@
 #include "hw/qdev-clock.h"
 #include "target/arm/cpu-qom.h"
 #include "target/arm/gtimer.h"
+#include "target/arm/arm-powerctl.h"
+#include "target/arm/cpu.h"
 #include <libfdt.h>
 #include "hw/loader.h"
 #include <zlib.h>  /* crc32() for uImage header fixup */
@@ -965,7 +967,7 @@ static const HisiSoCConfig hi3516cv500_soc = {
     .wdt_irq            = -1,
     .wdt_freq           = 3000000,
 
-    .num_crg_defaults   = 4,
+    .num_crg_defaults   = 3,
     .crg_defaults       = {
         { 0x1B8, (1 << 0) | (1 << 1) | (1 << 2) | (1 << 18)
                | (1 << 11) | (1 << 12) | (1 << 13)
@@ -975,8 +977,6 @@ static const HisiSoCConfig hi3516cv500_soc = {
                                          * + UART0 mux 24MHz */
         { 0x144, 0x02 },               /* FMC clock enable */
         { 0x16C, 0x02 },               /* ETH clock enable */
-        { 0x78,  (1 << 2) | (1 << 4) },
-                                        /* CPU1 + DBG1 in reset (kernel clears bit 2 for SMP) */
     },
 
     .gzip_base          = 0x11200000,
@@ -1084,7 +1084,7 @@ static const HisiSoCConfig hi3516av300_soc = {
     .wdt_irq            = -1,
     .wdt_freq           = 3000000,
 
-    .num_crg_defaults   = 4,
+    .num_crg_defaults   = 3,
     .crg_defaults       = {
         { 0x1B8, (1 << 0) | (1 << 1) | (1 << 2) | (1 << 18)
                | (1 << 11) | (1 << 12) | (1 << 13)
@@ -1092,7 +1092,6 @@ static const HisiSoCConfig hi3516av300_soc = {
                | (1 << 17) | (1 << 18) },
         { 0x144, 0x02 },
         { 0x16C, 0x02 },
-        { 0x78,  (1 << 2) | (1 << 4) },
     },
 
     .gzip_base          = 0x11200000,
@@ -1209,7 +1208,7 @@ static const HisiSoCConfig hi3516dv300_soc = {
     .wdt_irq            = -1,
     .wdt_freq           = 3000000,
 
-    .num_crg_defaults   = 4,
+    .num_crg_defaults   = 3,
     .crg_defaults       = {
         { 0x1B8, (1 << 0) | (1 << 1) | (1 << 2) | (1 << 18)
                | (1 << 11) | (1 << 12) | (1 << 13)
@@ -1217,7 +1216,6 @@ static const HisiSoCConfig hi3516dv300_soc = {
                | (1 << 17) | (1 << 18) },
         { 0x144, 0x02 },
         { 0x16C, 0x02 },
-        { 0x78,  (1 << 2) | (1 << 4) },
     },
 
     .gzip_base          = 0x11200000,
@@ -4226,6 +4224,58 @@ static char *hisilicon_patch_appended_dtb(const char *kernel_filename,
 
 static struct arm_boot_info hisilicon_binfo;
 
+/*
+ * No machine here uses boot.c's vexpress-style secondary pen.  Left at
+ * NULL, arm_load_kernel() would install it at smp_loader_start (0x0, as
+ * we never set it), clobbering the NULL trap page and the low page the
+ * vendor kernel writes its own trampoline into, and park the secondaries
+ * on it.  Secondaries instead stay start-powered-off until the SoC's
+ * release mechanism (CRG soft-reset bit, PSCI) turns them on.
+ */
+static void hisilicon_write_secondary_boot(ARMCPU *cpu,
+                                           const struct arm_boot_info *info)
+{
+}
+
+static void hisilicon_reset_secondary(ARMCPU *cpu,
+                                      const struct arm_boot_info *info)
+{
+}
+
+/*
+ * CV500/AV300/DV300 CPU1 release, driven by the CRG "cpu1-reset" line
+ * (REG_CPU_SRST_CRG bit 2).  Before clearing the bit the kernel has
+ * written "ldr pc, [pc, #-4]; .word secondary_startup" at physical 0,
+ * so CPU1 just has to leave reset at PC 0.
+ *
+ * After a firmware boot that is literally a reset: CPU0 runs U-Boot and
+ * the kernel in Secure SVC, and so does a freshly reset CPU1.  With
+ * -kernel, boot.c enters CPU0 in NS Hyp (or NS SVC without EL2), so
+ * start CPU1 at 0 in that same state; a Secure SVC CPU1 next to a Hyp
+ * CPU0 makes the kernel report "CPUs started in inconsistent modes" and
+ * drop the Hyp stub.
+ */
+typedef struct HisiCpuRelease {
+    ARMCPU *cpu;
+    bool kernel_boot;
+} HisiCpuRelease;
+
+static void hisilicon_cpu1_reset(void *opaque, int n, int level)
+{
+    HisiCpuRelease *r = opaque;
+    uint64_t mpidr = arm_cpu_mp_affinity(r->cpu);
+
+    if (level) {
+        arm_set_cpu_off(mpidr);
+    } else if (r->kernel_boot) {
+        int el = arm_feature(&r->cpu->env, ARM_FEATURE_EL2) ? 2 : 1;
+
+        arm_set_cpu_on(mpidr, 0, 0, el, false);
+    } else {
+        arm_set_cpu_on_and_reset(mpidr);
+    }
+}
+
 /* ARM instruction encoding helpers for boot ROM generation */
 static inline uint32_t arm_movw(int rd, uint16_t imm16)
 {
@@ -4577,10 +4627,12 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
     }
 
     MemoryRegion *bootrom = g_new(MemoryRegion, 1);
-    if (armv7) {
+    if (armv7 && !c->cpu_srst_offset) {
         /* Cortex-A7+ uses VBAR for exception vectors, so address 0 can be
          * ROM.  Firmware with NULL pointer bugs that write to address 0
-         * will have writes silently dropped — same as real silicon. */
+         * will have writes silently dropped — same as real silicon.
+         * SoCs that release CPU1 through the CRG (cpu_srst_offset) need
+         * it writable: the kernel puts CPU1's reset trampoline there. */
         memory_region_init_rom(bootrom, NULL, "hisilicon.bootrom",
                                0x1000, &error_fatal);
     } else {
@@ -4901,8 +4953,15 @@ static void hisilicon_common_init(MachineState *machine,
          * for V1–V5 IPC kernels.  Skip when RAM lives at 0 (e.g. STB family
          * Hi3798CV200) — the trap would conflict with the system memory. */
         MemoryRegion *trap = g_new(MemoryRegion, 1);
-        memory_region_init_rom(trap, NULL, "hisilicon.trapnull",
-                               0x1000, &error_fatal);
+        if (c->cpu_srst_offset) {
+            /* RAM, not ROM: the kernel's SMP bringup writes CPU1's reset
+             * trampoline here (see hisilicon_cpu1_reset). */
+            memory_region_init_ram(trap, NULL, "hisilicon.trapnull",
+                                   0x1000, &error_fatal);
+        } else {
+            memory_region_init_rom(trap, NULL, "hisilicon.trapnull",
+                                   0x1000, &error_fatal);
+        }
         memory_region_add_subregion(sysmem, 0, trap);
         uint32_t insn[2] = { cpu_to_le32(0xe3a00000),   /* mov r0, #0 */
                              cpu_to_le32(0xe12fff1e) };  /* bx lr      */
@@ -5125,15 +5184,17 @@ static void hisilicon_common_init(MachineState *machine,
         DeviceState *crg = qdev_new("hisi-crg");
         if (c->cpu_srst_offset) {
             qdev_prop_set_uint32(crg, "cpu-srst-offset", c->cpu_srst_offset);
-            if (c->max_cpus > 1) {
-                qdev_prop_set_uint32(crg, "smp-bootreg-addr",
-                                     c->sram_base + 0x100);
-                /* Address 0x4: where kernel writes secondary_startup addr */
-                qdev_prop_set_uint32(crg, "smp-entry-addr", 0x4);
-            }
         }
         sysbus_realize_and_unref(SYS_BUS_DEVICE(crg), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(crg), 0, c->crg_base);
+        if (c->cpu_srst_offset && smp_cpus > 1) {
+            HisiCpuRelease *r = g_new0(HisiCpuRelease, 1);
+
+            r->cpu = cpu[1];
+            r->kernel_boot = machine->kernel_filename != NULL;
+            qdev_connect_gpio_out_named(crg, "cpu1-reset", 0,
+                qemu_allocate_irq(hisilicon_cpu1_reset, r, 0));
+        }
 
         /* Pre-enable clocks (mimics U-Boot init before kernel boot) */
         for (n = 0; n < c->num_crg_defaults; n++) {
@@ -5816,6 +5877,8 @@ static void hisilicon_common_init(MachineState *machine,
         }
         hisilicon_binfo.loader_start = c->ram_base;
         hisilicon_binfo.board_id = c->board_id; /* ATAGs machine_arch_type */
+        hisilicon_binfo.write_secondary_boot = hisilicon_write_secondary_boot;
+        hisilicon_binfo.secondary_cpu_reset_hook = hisilicon_reset_secondary;
         if (c->psci_conduit) {
             /* ARMv8 STB family — PSCI/SMC for SMP, suppresses upstream
              * "smpboot" stub at 0x0 that collides with the bootloader. */
