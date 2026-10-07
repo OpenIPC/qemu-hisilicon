@@ -698,9 +698,18 @@ static void hisi_fmc_exec_nand_reg_op(HisiFmcState *s)
 
     case SPI_CMD_SECTOR_ERASE: { /* 0xD8 = Block Erase for NAND */
         if (s->sr & SPI_SR_WEL) {
-            uint32_t block, page, column;
+            /*
+             * Unlike page read/program (column first, so ADDRL = row << 16),
+             * nand_base sends only the 3 row-address cycles for an erase and
+             * hifmc100/fmc100 write them to ADDRL as-is:
+             *   FMC_ADDRL_BLOCK_H_MASK(addr_value[1]) |
+             *   FMC_ADDRL_BLOCK_L_MASK(addr_value[0])  == row & ~0x3f
+             * Decoding this with hisi_fmc_nand_decode_addr() (>> 22) mapped
+             * every erase to block 0, so saveenv wiped U-Boot.
+             */
+            uint32_t row = s->addrl & 0xFFFFFF;
+            uint32_t block = row / NAND_PAGES_PER_BLOCK;
             uint32_t nblocks = s->nand_size / NAND_BLOCK_SIZE;
-            hisi_fmc_nand_decode_addr(s, &block, &page, &column);
             if (block < nblocks) {
                 uint32_t flash_off = block * NAND_BLOCK_SIZE;
                 uint32_t oob_off = block * NAND_PAGES_PER_BLOCK *

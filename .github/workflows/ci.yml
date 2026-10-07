@@ -40,6 +40,9 @@ jobs:
           # aarch64 V5 machines (Hi3519DV500 / Hi3516DV500)
           ./qemu-src/build/qemu-system-aarch64 -machine help | grep -E 'hi3519dv500|hi3516dv500'
 
+      - name: SPI-NAND erase/program addressing (hisi-fmc)
+        run: bash qemu/tests/test-hisi-fmc-nand-erase.sh
+
       - name: Upload QEMU binary
         uses: actions/upload-artifact@v4
         with:
