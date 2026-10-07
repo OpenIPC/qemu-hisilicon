@@ -137,6 +137,13 @@ typedef struct HisiSoCConfig {
     int             timer_irqs[HISI_MAX_TIMERS];
     uint32_t        timer_freq;     /* 0 = device default */
     /*
+     * ARM generic timer (CNTFRQ) rate.  QEMU's Cortex-A7 counter runs at
+     * 62.5 MHz unless told otherwise, but vendor DTS arm,armv7-timer nodes
+     * pin clock-frequency (50 MHz V4/V4A, 24 MHz V3A), and the kernel then
+     * converts counter ticks to time at the DT rate.  0 = QEMU default.
+     */
+    uint32_t        arch_timer_freq;
+    /*
      * Goke V500 "xmsp804": one hisi-xmsp804 device (4 single-timer blocks at
      * 0x100 stride) at timer_bases[0] instead of the stock dual-timer sp804s.
      * When set, the sp804 loop above is skipped.  See hisi-xmsp804.c.

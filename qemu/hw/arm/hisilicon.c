@@ -847,7 +847,8 @@ static const HisiSoCConfig hi3516cv300_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 3, 4 },
-    .timer_freq         = 24000000,     /* 24 MHz */
+    .timer_freq         = 3000000,      /* kernel: "sched_clock: 32 bits at
+                                         * 3000kHz", -kernel and U-Boot alike */
 
     .num_spis           = 2,
     .spi_bases          = { 0x12120000, 0x12121000 },
@@ -878,6 +879,20 @@ static const HisiSoCConfig hi3516cv300_soc = {
     .wdt_irq            = -1,
     .wdt_freq           = 3000000,
 };
+
+/*
+ * Timer clocks of the Hi3516EV200/EV300 SDK family (EV200, EV300, 18EV300,
+ * DV200 and their Goke rebrands) and of the CV500/AV300/DV300 SDK.  Their
+ * DTS clock the SP804s (arm,sp804 / hisilicon,hisp804) from the fixed 3 MHz
+ * clock (clk_3m, or CRG HI35xx_FIXED_3M) and declare the arm,armv7-timer at
+ * clock-frequency = 50 MHz.  Left at QEMU's defaults (SP804 1 MHz, generic
+ * timer 62.5 MHz) the guest clock ran at 1/3 speed where hisp804 is the
+ * clocksource (CV500/AV300/DV300) and 1.25x where arch_sys_counter is
+ * (EV200/EV300).
+ */
+#define HISI_V4_TIMER_CLOCKS                                \
+    .timer_freq         = 3000000,                          \
+    .arch_timer_freq    = 50000000
 
 /*
  * Hi3516CV500 (V3.5): 2018, 3M smart-vision.  Dual Cortex-A7 @900MHz.
@@ -925,6 +940,7 @@ static const HisiSoCConfig hi3516cv500_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 1, 2 },
+    HISI_V4_TIMER_CLOCKS,
 
     .num_spis           = 3,
     .spi_bases          = { 0x120C0000, 0x120C1000, 0x120C2000 },
@@ -1042,6 +1058,7 @@ static const HisiSoCConfig hi3516av300_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 1, 2 },
+    HISI_V4_TIMER_CLOCKS,
 
     .num_spis           = 3,
     .spi_bases          = { 0x120C0000, 0x120C1000, 0x120C2000 },
@@ -1166,6 +1183,7 @@ static const HisiSoCConfig hi3516dv300_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 1, 2 },
+    HISI_V4_TIMER_CLOCKS,
 
     .num_spis           = 3,
     .spi_bases          = { 0x120C0000, 0x120C1000, 0x120C2000 },
@@ -1286,6 +1304,7 @@ static const HisiSoCConfig hi3519v101_soc = {
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 64, 66 },
     .timer_freq         = 3000000,          /* 3 MHz */
+    .arch_timer_freq    = 24000000,         /* DTS armv7-timer clock-frequency */
 
     .num_spis           = 4,
     .spi_bases          = { 0x12120000, 0x12121000, 0x12122000, 0x12123000 },
@@ -1395,6 +1414,7 @@ static const HisiSoCConfig hi3516av200_soc = {
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 64, 66 },
     .timer_freq         = 3000000,
+    .arch_timer_freq    = 24000000,         /* same SDK DTS as Hi3519V101 */
 
     .num_spis           = 4,
     .spi_bases          = { 0x12120000, 0x12121000, 0x12122000, 0x12123000 },
@@ -1506,6 +1526,7 @@ static const HisiSoCConfig hi3516ev300_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 5, 6 },
+    HISI_V4_TIMER_CLOCKS,
 
     .num_spis           = 2,
     .spi_bases          = { 0x12070000, 0x12071000 },
@@ -1617,6 +1638,7 @@ static const HisiSoCConfig hi3516ev200_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 5, 6 },
+    HISI_V4_TIMER_CLOCKS,
 
     .num_spis           = 2,
     .spi_bases          = { 0x12070000, 0x12071000 },
@@ -1705,6 +1727,7 @@ static const HisiSoCConfig hi3518ev300_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 5, 6 },
+    HISI_V4_TIMER_CLOCKS,
 
     .num_spis           = 2,
     .spi_bases          = { 0x12070000, 0x12071000 },
@@ -1790,6 +1813,7 @@ static const HisiSoCConfig hi3516dv200_soc = {
     .num_timers         = 2,
     .timer_bases        = { 0x12000000, 0x12001000 },
     .timer_irqs         = { 5, 6 },
+    HISI_V4_TIMER_CLOCKS,
 
     .num_spis           = 2,
     .spi_bases          = { 0x12070000, 0x12071000 },
@@ -1982,6 +2006,7 @@ static const HisiSoCConfig gk7205v200_soc = {
     .default_sensor     = "imx307",     /* same die as EV200 */
     HISI_V4_DDR_64M,                /* EV200 die: 512Mb DDR2 */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_TIMER_CLOCKS,
 };
 
 /*
@@ -2027,6 +2052,7 @@ static const HisiSoCConfig gk7205v300_soc = {
     .default_sensor     = "imx335",     /* same die as EV300 */
     HISI_V4_DDR_128M,               /* EV300 die: 1Gb DDR3L */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_TIMER_CLOCKS,
 };
 
 static const HisiSoCConfig gk7202v300_soc = {
@@ -2036,6 +2062,7 @@ static const HisiSoCConfig gk7202v300_soc = {
     .gpio_count         = 8,
     HISI_V4_DDR_64M,                /* 18EV300 die: 512Mb DDR2 */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_TIMER_CLOCKS,
 };
 
 static const HisiSoCConfig gk7605v100_soc = {
@@ -2045,6 +2072,7 @@ static const HisiSoCConfig gk7605v100_soc = {
     .gpio_count         = 10,
     HISI_V4_DDR_128M,               /* DV200 die: external 128 MiB typical */
     HISI_V4_COMMON_PERIPH,
+    HISI_V4_TIMER_CLOCKS,
 };
 
 /*
@@ -5032,6 +5060,10 @@ static void hisilicon_common_init(MachineState *machine,
                 object_property_set_int(cpuobj[n], "psci-conduit",
                                         c->psci_conduit, &error_fatal);
             }
+        }
+        if (c->arch_timer_freq) {
+            object_property_set_uint(cpuobj[n], "cntfrq", c->arch_timer_freq,
+                                     &error_fatal);
         }
         qdev_realize(DEVICE(cpuobj[n]), NULL, &error_fatal);
         cpu[n] = ARM_CPU(cpuobj[n]);

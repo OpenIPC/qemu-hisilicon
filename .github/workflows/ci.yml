@@ -637,6 +637,21 @@ jobs:
           kill $QEMU_PID 2>/dev/null || true
           exit 1
 
+      - name: "Guest clock runs at wall-clock speed"
+        timeout-minutes: 5
+        # The login prompt appears even when the guest timebase disagrees
+        # with the rate the DTB gives the kernel (SP804 vs clk_3m, generic
+        # timer vs arm,armv7-timer clock-frequency), so assert it directly:
+        # init=/bin/sh, /proc/uptime sampled 20 s of host time apart.
+        run: |
+          python3 qemu-boot/test-guest-clock.py \
+            --qemu ./qemu-src/build/qemu-system-arm \
+            --machine "${{ matrix.machine }}" \
+            --smp ${{ matrix.smp || 1 }} \
+            --kernel "qemu-boot/uImage.${{ matrix.soc }}" \
+            --initrd "qemu-boot/rootfs.squashfs.${{ matrix.soc }}" \
+            --log "qemu-boot/guest-clock-${{ matrix.soc }}.log"
+
       - name: "SPI-NOR erase/program round-trip"
         if: matrix.flash_rw
         timeout-minutes: 8
@@ -794,6 +809,7 @@ jobs:
             boot-output.txt
             qemu-boot/qemu.log
             qemu-boot/linux-network-${{ matrix.soc }}
+            qemu-boot/guest-clock-${{ matrix.soc }}.log
             /tmp/*-ping.txt
             /tmp/linux-network-summary.txt
           retention-days: 7
