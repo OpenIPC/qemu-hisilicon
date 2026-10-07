@@ -317,7 +317,7 @@ NAND boot device so U-Boot takes the NAND path instead of probing NOR.
 bash qemu-boot/run-gk7205v510-nand.sh nand-dump.bin
 
 # OpenIPC hi3516ev300 NAND build — assemble image, then flash-boot it:
-bash qemu-boot/mk-ev300-nand.sh        # u-boot + ubinize(kernel+rootfs+rootfs_data)
+bash qemu-boot/mk-ev300-nand.sh        # u-boot + release rootfs.ubi (UBIFS, /boot/fitImage)
 bash qemu-boot/run-ev300-nand.sh
 ```
 

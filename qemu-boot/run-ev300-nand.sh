@@ -3,8 +3,9 @@
 # Boot OpenIPC on emulated Hi3516EV300 ENTIRELY FROM a SPI-NAND image
 # (no -kernel / -initrd / -dtb).  The synthetic boot ROM runs U-Boot from
 # NAND; U-Boot reports the boot device as SPI-NAND (SYSSTAT strap), attaches
-# UBI, reads the kernel volume and bootm's it; the kernel attaches UBI and
-# mounts the squashfs rootfs via ubiblock — all from the emulated GD5F1GM7.
+# UBI, ubifsloads /boot/fitImage from the UBIFS rootfs and bootm's it; the
+# kernel attaches UBI and mounts ubi0:rootfs as UBIFS — all from the emulated
+# SPI-NAND.
 #
 # Build the image first:
 #   bash qemu-boot/mk-ev300-nand.sh        # assembles ev300-nand.img
