@@ -666,7 +666,13 @@ jobs:
 
       - name: "Linux network test"
         if: matrix.ping_linux
-        timeout-minutes: 6
+        timeout-minutes: 8
+        # --ping-timeout is the wait for dropbear's banner on :22.  In
+        # practice the banner only arrives once load_hisilicon finishes;
+        # with guest time at wall-clock speed that is ~70 s after the DHCP
+        # lease on hi3519v101 (its generic timer used to run 2.6x fast,
+        # which hid the vendor modules' timed waits).  The loop exits on
+        # the first banner, so the larger budget costs fast SoCs nothing.
         run: |
           bash qemu-boot/test-linux-network.sh \
             --soc "${{ matrix.soc }}" \
@@ -676,7 +682,7 @@ jobs:
             --tap tap0 \
             --host-ip 10.0.10.1 \
             --login-timeout 150 \
-            --ping-timeout 45 \
+            --ping-timeout 150 \
             --curl-timeout 60 \
             --curl-max-time 90 \
             --dns-ip 10.0.20.1 \
