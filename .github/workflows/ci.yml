@@ -40,6 +40,9 @@ jobs:
           # aarch64 V5 machines (Hi3519DV500 / Hi3516DV500)
           ./qemu-src/build/qemu-system-aarch64 -machine help | grep -E 'hi3519dv500|hi3516dv500'
 
+      - name: SPI-NAND erase/program addressing (hisi-fmc)
+        run: bash qemu/tests/test-hisi-fmc-nand-erase.sh
+
       - name: Upload QEMU binary
         uses: actions/upload-artifact@v4
         with:
@@ -883,9 +886,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libfdt1 libglib2.0-0 libpixman-1-0 libslirp0 \
-            mtd-utils squashfs-tools python3-pip
-          pip3 install --break-system-packages ubi_reader
+            libfdt1 libglib2.0-0 libpixman-1-0 libslirp0
 
       - name: Download QEMU binary
         uses: actions/download-artifact@v4
@@ -903,17 +904,16 @@ jobs:
         timeout-minutes: 4
         run: |
           # Boots ENTIRELY from the emulated SPI-NAND (no -kernel): boot ROM ->
-          # U-Boot (attaches UBI, reads kernel volume) -> kernel -> ubiblock
-          # squashfs root.  nand-jedec/nand-oob-size present the W25N01GV the
-          # OpenIPC ev300 U-Boot SPI-NAND id table knows.
+          # U-Boot (attaches UBI, ubifsloads /boot/fitImage from the UBIFS
+          # rootfs) -> kernel -> UBIFS root.  nand-jedec/nand-oob-size present
+          # the W25N01GV the OpenIPC ev300 U-Boot SPI-NAND id table knows.
           #
-          # The gate is the NAND/UBI storage chain itself — U-Boot + kernel
-          # attach UBI from the emulated NAND and mount the squashfs rootfs via
-          # ubiblock — which is exactly what this PR delivers and is fully
-          # deterministic.  It deliberately does NOT wait for a login prompt:
-          # the OpenIPC "ultimate" rootfs (the only NAND build OpenIPC ships
-          # for ev300) runs load_hisilicon, which insmods the vendor MPP/mmz
-          # blob that hangs on QEMU regardless of storage backend.
+          # The gate is the NAND/UBI storage chain: root mounted as UBIFS from
+          # the emulated NAND, then init mounting rootfs_data.  On first boot
+          # rootfs_data is empty, so the kernel formats it — real erases and
+          # page programs — after which the boot partition must still be
+          # byte-identical to the U-Boot written there (an erase decoded to
+          # the wrong block used to wipe it).
           QEMU=./qemu-src/build/qemu-system-arm
           timeout 180 $QEMU -M hi3516ev300,sensor=none,flash-file=qemu-boot/ev300-nand.img \
             -global hisi-fmc.nand-jedec=0xEFAA21 \
@@ -923,30 +923,34 @@ jobs:
           QEMU_PID=$!
 
           for i in $(seq 1 180); do
-            if grep -q "Mounted root (squashfs filesystem)" boot-output.txt 2>/dev/null; then
+            if grep -q 'name "rootfs_data"' boot-output.txt 2>/dev/null; then
               echo ""
-              echo "=== NAND -> UBI -> squashfs root mounted ==="
+              echo "=== NAND -> UBI -> UBIFS root + rootfs_data mounted ==="
               kill $QEMU_PID 2>/dev/null || true
+              sleep 1
               # The whole chain must have run, and cleanly.
-              grep -q "block ubiblock0_1: created from ubi0:1(rootfs)" boot-output.txt \
-                || { echo "FAIL: ubiblock not created from NAND UBI"; exit 1; }
-              if grep -qE "Kernel panic|Unable to mount root|spi_flash_probe\(\) failed" boot-output.txt; then
+              grep -q "Mounted root (ubifs filesystem)" boot-output.txt \
+                || { echo "FAIL: root not mounted as UBIFS from NAND"; exit 1; }
+              if grep -qE "Kernel panic|Unable to mount root|spi_flash_probe\(\) failed|UBIFS error" boot-output.txt; then
                 echo "=== FAIL: panic / NAND-boot regression ==="
-                grep -nE "Kernel panic|Unable to mount root|spi_flash_probe\(\) failed" boot-output.txt | head
+                grep -nE "Kernel panic|Unable to mount root|spi_flash_probe\(\) failed|UBIFS error" boot-output.txt | head
                 exit 1
               fi
-              echo "=== Boot clean (boot ROM -> U-Boot UBI -> kernel UBI -> ubiblock -> squashfs root) ==="
+              UB=/tmp/ev300-nand-mk/u-boot-hi3516ev300-nand.bin
+              cmp -n "$(stat -c %s "$UB")" "$UB" qemu-boot/ev300-nand.img \
+                || { echo "FAIL: U-Boot in the NAND image was overwritten during boot"; exit 1; }
+              echo "=== Boot clean (boot ROM -> U-Boot UBI -> fitImage -> UBIFS root -> rootfs_data), boot partition intact ==="
               exit 0
             fi
             if ! kill -0 $QEMU_PID 2>/dev/null; then
-              echo "=== FAIL: QEMU exited before mounting root ==="
+              echo "=== FAIL: QEMU exited before mounting rootfs_data ==="
               tail -40 boot-output.txt
               exit 1
             fi
             sleep 1
           done
 
-          echo "=== TIMEOUT: root not mounted from NAND/UBI ==="
+          echo "=== TIMEOUT: rootfs_data not mounted from NAND/UBI ==="
           tail -40 boot-output.txt
           kill $QEMU_PID 2>/dev/null || true
           exit 1
