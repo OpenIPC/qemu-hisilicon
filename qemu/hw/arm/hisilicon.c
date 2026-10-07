@@ -4673,6 +4673,7 @@ static void hisilicon_write_bootrom(MemoryRegion *sysmem,
 typedef struct {
     ARMCPU  *cpu;
     uint64_t entry;
+    MemoryRegion *alias0;       /* reset-time mask-ROM alias at 0 */
 } HisiMaskromReset;
 
 static void hisilicon_maskrom_cpu_reset(void *opaque)
@@ -4680,11 +4681,30 @@ static void hisilicon_maskrom_cpu_reset(void *opaque)
     HisiMaskromReset *info = opaque;
     CPUState *cs = CPU(info->cpu);
 
+    memory_region_set_enabled(info->alias0, true);
     cpu_reset(cs);
     cpu_set_pc(cs, info->entry);
 }
 
-static void hisilicon_load_maskrom(MemoryRegion *sysmem,
+/*
+ * SC_CTRL bit 8 ("clear boot remap"), driven by hisi-sysctl.  The
+ * mask-ROM sets it in its last step before jumping to the loaded image;
+ * from then on address 0 is memory again.  The SoCs that release CPU1
+ * through the CRG depend on that: the kernel writes CPU1's reset
+ * trampoline at physical 0.  One-way until the next system reset, so a
+ * later SC_CTRL write that happens to leave bit 8 clear cannot bring the
+ * ROM back over the trampoline.
+ */
+static void hisilicon_maskrom_remap(void *opaque, int n, int level)
+{
+    HisiMaskromReset *info = opaque;
+
+    if (level) {
+        memory_region_set_enabled(info->alias0, false);
+    }
+}
+
+static HisiMaskromReset *hisilicon_load_maskrom(MemoryRegion *sysmem,
                                     const HisiSoCConfig *c,
                                     MachineState *machine,
                                     ARMCPU *cpu0)
@@ -4693,6 +4713,7 @@ static void hisilicon_load_maskrom(MemoryRegion *sysmem,
     uint64_t entry, low, high;
     ssize_t loaded;
     HisiMaskromReset *info;
+    MemoryRegion *alias;
 
     if (c->sram_base != 0x04010000) {
         error_report("hisilicon: -bios mask-ROM path is only wired up for "
@@ -4720,12 +4741,10 @@ static void hisilicon_load_maskrom(MemoryRegion *sysmem,
      * compatibility, then this alias takes precedence in the
      * memory region priority).
      */
-    {
-        MemoryRegion *alias = g_new(MemoryRegion, 1);
-        memory_region_init_alias(alias, NULL, "hisilicon.maskrom-alias-0",
-                                 rom, 0, HISI_MASKROM_SIZE);
-        memory_region_add_subregion_overlap(sysmem, 0, alias, 1);
-    }
+    alias = g_new(MemoryRegion, 1);
+    memory_region_init_alias(alias, NULL, "hisilicon.maskrom-alias-0",
+                             rom, 0, HISI_MASKROM_SIZE);
+    memory_region_add_subregion_overlap(sysmem, 0, alias, 1);
 
     loaded = load_elf(machine->firmware, NULL, NULL, NULL,
                       &entry, &low, &high, NULL,
@@ -4750,7 +4769,9 @@ static void hisilicon_load_maskrom(MemoryRegion *sysmem,
     info = g_new0(HisiMaskromReset, 1);
     info->cpu = cpu0;
     info->entry = entry;
+    info->alias0 = alias;
     qemu_register_reset(hisilicon_maskrom_cpu_reset, info);
+    return info;
 }
 
 /*
@@ -4848,6 +4869,7 @@ static void hisilicon_common_init(MachineState *machine,
     bool flash_boot = false;  /* true when booting from SPI NOR flash dump */
     bool fmc_nand_boot = false; /* true when the FMC boot flash is SPI NAND */
     bool bios_boot = machine->firmware && machine->firmware[0];
+    HisiMaskromReset *maskrom = NULL;
                                 /* true when -bios loads a mask-ROM ELF */
 
     /* SRAM (skipped on STB family which has no on-chip SRAM in DT) */
@@ -5018,7 +5040,7 @@ static void hisilicon_common_init(MachineState *machine,
     /* Mask-ROM ELF (-bios) is loaded once CPU 0 exists; the registered
      * reset hook fires after cpu_reset() to redirect PC to the ELF entry. */
     if (bios_boot) {
-        hisilicon_load_maskrom(sysmem, c, machine, cpu[0]);
+        maskrom = hisilicon_load_maskrom(sysmem, c, machine, cpu[0]);
     }
 
     /* Interrupt controller */
@@ -5144,6 +5166,10 @@ static void hisilicon_common_init(MachineState *machine,
         qdev_prop_set_uint32(sysctl, "v1-chip-id-8c", c->v1_chip_id_8c);
         sysbus_realize_and_unref(SYS_BUS_DEVICE(sysctl), &error_fatal);
         sysbus_mmio_map(SYS_BUS_DEVICE(sysctl), 0, c->sysctl_base);
+        if (maskrom) {
+            qdev_connect_gpio_out_named(sysctl, "remap-clear", 0,
+                qemu_allocate_irq(hisilicon_maskrom_remap, maskrom, 0));
+        }
 
         /*
          * Pinstrap injection for -bios mask-ROM runs.  Real silicon

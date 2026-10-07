@@ -43,6 +43,9 @@ jobs:
       - name: SPI-NAND erase/program addressing (hisi-fmc)
         run: bash qemu/tests/test-hisi-fmc-nand-erase.sh
 
+      - name: CPU1 release via CRG soft-reset (hisi-crg, -bios path)
+        run: bash qemu/tests/test-hisi-smp-release.sh
+
       - name: Upload QEMU binary
         uses: actions/upload-artifact@v4
         with:
