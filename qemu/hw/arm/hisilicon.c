@@ -5929,10 +5929,23 @@ static void hisilicon_common_init(MachineState *machine,
             machine->kernel_cmdline = g_string_free(cl, false);
         }
 
+        /*
+         * The guest is told the whole DDR, as U-Boot tells it: ATAG_MEM,
+         * which an ATAG_DTB_COMPAT kernel copies into its memory node, is
+         * what OpenIPC's load_hisilicon reads as total RAM, and it carves
+         * MMZ out of what lies above mem=.  Reporting kernel_mem_mb there
+         * instead (32M) made the firmware see total == os_mem and load no
+         * modules.
+         *
+         * kernel_mem_mb keeps its other job, placing the initrd and DTB:
+         * at its first half, exactly as before.  That is below any MMZ the
+         * command line carves -- the hisi allocator's above mem=, and the
+         * CMA one inside it (hi3516ev300 CI: mem=128M with CMA from
+         * 0x42000000; an initrd placed by mem= at +64M landed in that
+         * region and the kernel died before its console came up).
+         */
         hisilicon_binfo.ram_size = machine->ram_size;
-        if (c->kernel_mem_mb) {
-            hisilicon_binfo.ram_size = (hwaddr)c->kernel_mem_mb * MiB;
-        }
+        hisilicon_binfo.kernel_ram_size = (uint64_t)c->kernel_mem_mb * MiB;
         hisilicon_binfo.loader_start = c->ram_base;
         hisilicon_binfo.board_id = c->board_id; /* ATAGs machine_arch_type */
         hisilicon_binfo.write_secondary_boot = hisilicon_write_secondary_boot;
